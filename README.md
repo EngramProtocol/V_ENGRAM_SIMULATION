@@ -8,7 +8,8 @@ sketches, treats each sketch as a Kademlia rendezvous target, and retrieves
 candidates by walking the overlay toward those targets. This repository
 reproduces every table and figure in the paper.
 
-Release `v1.0-cc`, commit `1a9cbdd`.
+Released as `v1.0-cc`. The manuscript cites that tag; `git checkout v1.0-cc`
+gives the exact tree the reported numbers came from.
 
 ## Layout
 
