@@ -56,6 +56,82 @@ _OVERLAP_STATS = []
 import os as _os
 # Mục 21: quét R_max qua biến môi trường
 DEFAULT_R_MAX = int(_os.environ.get("R_MAX", "15"))   # trần số vòng mỗi lookup
+
+# ---------------------------------------------------------------------------
+# QUY TẮC DỪNG THEO PHA (ppna-r1, mục 2.3 của tài liệu sửa bài)
+#
+# STOP_RULE / FRONTIER_SCOPE / R_MAX áp cho CẢ tiến trình, nên mỗi biến thể
+# của bảng termination đổi luôn ba thứ: bảng định tuyến dựng lúc join, vị trí
+# record lúc ingest, và lookup lúc truy vấn. Các biến dưới đây cho phép cố định
+# join và ingest trong khi chỉ đổi quy tắc truy vấn:
+#     JOIN_STOP_RULE   JOIN_FRONTIER_SCOPE   JOIN_R_MAX
+#     INGEST_STOP_RULE INGEST_FRONTIER_SCOPE INGEST_R_MAX
+# Không đặt thì pha đó dùng STOP_RULE / FRONTIER_SCOPE / R_MAX như cũ, nên mọi
+# kết quả cũ giữ nguyên từng bit. Pha truy vấn, payload và mọi lời gọi không
+# ghi pha luôn dùng STOP_RULE / FRONTIER_SCOPE / R_MAX.
+# ---------------------------------------------------------------------------
+def _phase_env(prefix):
+    sr = _os.environ.get(f"{prefix}_STOP_RULE")
+    fs = _os.environ.get(f"{prefix}_FRONTIER_SCOPE")
+    if sr is not None and sr not in ("stable", "exhaust"):
+        raise SystemExit(f"{prefix}_STOP_RULE phải là stable hoặc exhaust, nhận '{sr}'")
+    if fs is not None and fs not in ("all", "topk"):
+        raise SystemExit(f"{prefix}_FRONTIER_SCOPE phải là all hoặc topk, nhận '{fs}'")
+    return (STOP_RULE if sr is None else sr,
+            FRONTIER_SCOPE if fs is None else fs,
+            int(_os.environ.get(f"{prefix}_R_MAX", str(DEFAULT_R_MAX))))
+
+
+PHASE_RULES = {
+    None: (STOP_RULE, FRONTIER_SCOPE, DEFAULT_R_MAX),
+    "join": _phase_env("JOIN"),
+    "ingest": _phase_env("INGEST"),
+}
+
+
+def phase_rules(phase=None):
+    """(stop_rule, frontier_scope, r_max) của một pha; pha khác join/ingest dùng quy tắc truy vấn."""
+    return PHASE_RULES.get(phase, PHASE_RULES[None])
+
+
+def rules_summary():
+    """Chuỗi mô tả quy tắc từng pha, để ghi vào JSON kết quả."""
+    return {ph or "query": "%s/%s/R%d" % phase_rules(ph) for ph in (None, "join", "ingest")}
+
+
+# Thống kê lookup theo pha: số lookup, tổng vòng, tổng RPC, và lý do dừng
+# ("cap" = chạy hết R_max, "stable" = frontier ổn định, "empty" = hết peer để hỏi).
+# Chỉ đếm, không dùng số ngẫu nhiên nên không đổi kết quả.
+LOOKUP_STATS = {}
+
+
+def _note_lookup(phase, hops, rpcs, reason):
+    s = LOOKUP_STATS.get(phase or "other")
+    if s is None:
+        s = LOOKUP_STATS[phase or "other"] = {"n": 0, "hops": 0, "rpcs": 0,
+                                              "cap": 0, "stable": 0, "empty": 0}
+    s["n"] += 1
+    s["hops"] += hops
+    s["rpcs"] += rpcs
+    s[reason] += 1
+
+
+def lookup_stats_summary():
+    out = {}
+    for ph, s in LOOKUP_STATS.items():
+        n = max(s["n"], 1)
+        out[ph] = {"n": s["n"], "mean_rounds": s["hops"] / n, "mean_rpcs": s["rpcs"] / n,
+                   "frac_cap": s["cap"] / n, "frac_stable": s["stable"] / n,
+                   "frac_empty": s["empty"] / n}
+    return out
+
+
+# MEASURE_OVERLAP=1 bật hai phép đo đắt: thứ hạng XOR của peer trả về trong
+# từng probe truy vấn (xor_rank_mean), và độ trùng với tập XOR-gần nhất cho MỌI
+# lookup sau khi dựng mạng (overlap_mean, gồm cả 100.000 lookup lúc ingest).
+# OVERLAP_STATS=0 tắt riêng phép đo thứ hai để chạy nhanh hơn; xor_rank_mean
+# giữ nguyên. Không ảnh hưởng kết quả định tuyến.
+OVERLAP_STATS = _os.environ.get("OVERLAP_STATS", "1") == "1"
 DEFAULT_MULTI_PROBE = 3  # T — số prefix probe mỗi bảng (mục 3.5)
 DEFAULT_PROBE_BITS = 16  # c — số bit đầu được phép lật khi probe
 
@@ -165,7 +241,7 @@ def generate_placement_key(object_tag, shard_id):
     return int(mac_hash, 16) % (1 << 160)
 
 def iterative_find_k_closest_nodes(key, bootstrap_node, alpha=DEFAULT_ALPHA,
-                                   k=20, max_rounds=DEFAULT_R_MAX):
+                                   k=20, max_rounds=None, phase=None):
     """Ripple Search cho MỘT prefix (paper Algorithm 1).
 
     Đây là thủ tục KHÁM PHÁ LÂN CẬN theo lối best-first có ngân sách, chạy trên
@@ -181,21 +257,30 @@ def iterative_find_k_closest_nodes(key, bootstrap_node, alpha=DEFAULT_ALPHA,
 
     Trả về (k node gần nhất, số vòng, số RPC).
     Ba đại lượng rounds/RPC/contacted-nodes được đếm TÁCH BẠCH (mục 3.9).
+
+    phase ("join", "ingest", "query", "payload" hoặc None) chọn quy tắc dừng
+    theo PHASE_RULES và là nhãn cho LOOKUP_STATS. max_rounds=None lấy R_max
+    của pha đó.
     """
+    stop_rule, frontier_scope, phase_rmax = phase_rules(phase)
+    if max_rounds is None:
+        max_rounds = phase_rmax
     candidates = set([bootstrap_node])
     candidates.update(bootstrap_node.get_neighbors())
     queried = set()
     prev_best = None
     hops = 0
     rpcs = 0
+    reason = "cap"
 
     for _ in range(max_rounds):
         ordered = sorted(candidates, key=lambda node: node.node_id ^ key)
 
-        pool = ordered if FRONTIER_SCOPE == "all" else ordered[:k]
+        pool = ordered if frontier_scope == "all" else ordered[:k]
         to_query = [node for node in pool if node not in queried][:alpha]
 
         if not to_query:
+            reason = "empty"
             break          # với scope="topk" đây chính là exhaustive termination
 
         hops += 1
@@ -209,9 +294,10 @@ def iterative_find_k_closest_nodes(key, bootstrap_node, alpha=DEFAULT_ALPHA,
             else:
                 candidates.update(node.get_neighbors())
 
-        if STOP_RULE == "stable":
+        if stop_rule == "stable":
             best_ids = tuple(node.node_id for node in ordered[:k])
             if best_ids == prev_best:
+                reason = "stable"
                 break
             prev_best = best_ids
 
@@ -225,9 +311,10 @@ def iterative_find_k_closest_nodes(key, bootstrap_node, alpha=DEFAULT_ALPHA,
     # toàn cục mà recall lại CAO hơn, thì rõ ràng hội tụ XOR không phải mục tiêu.
     #
     # Đắt (sắp xếp toàn mạng mỗi lookup) nên chỉ bật khi chẩn đoán.
-    if MEASURE_OVERLAP and _ALL_NODES:
+    if MEASURE_OVERLAP and OVERLAP_STATS and _ALL_NODES:
         true_k = sorted(_ALL_NODES, key=lambda nd: nd.node_id ^ key)[:k]
         ov = len({nd.node_id for nd in result} & {nd.node_id for nd in true_k})
         _OVERLAP_STATS.append(ov / max(k, 1))
 
+    _note_lookup(phase, hops, rpcs, reason)
     return result, hops, rpcs

@@ -19,7 +19,24 @@ import os as _os
 #   DATASET=scifact NUM_FILES=5183 python3 main_churn_test.py
 DATASET = _os.environ.get("DATASET", "code")          # code | scifact | squad
 EMBEDDINGS_PATH = f"./data/{DATASET}_corpus_embeddings.npy"
-PQ_CODES_PATH = f"./data/{DATASET}_pq_codes.npy"
+# PQ code chỉ được lưu, không ảnh hưởng availability. Mặc định giữ file cũ
+# (không hậu tố, m=256); PQ_VARIANT=m512 dùng file của bài.
+PQ_VARIANT = _os.environ.get("PQ_VARIANT", "")
+_PQSFX = f"_{PQ_VARIANT}" if PQ_VARIANT and PQ_VARIANT != "m256" else ""
+PQ_CODES_PATH = f"./data/{DATASET}_pq_codes{_PQSFX}.npy"
+
+# ---- ppna-r1 (mục 2.4 của tài liệu sửa bài) ----
+# NET_SEED: đặt seed cho ID peer, cấu trúc overlay và ma trận chiếu trước khi
+#   dựng mạng. Bản cũ KHÔNG đặt seed nên mỗi lần chạy là một mạng khác và không
+#   tái lập được. Không đặt thì giữ hành vi cũ.
+# INGEST_SAMPLE_ONLY=1: chỉ ingest RECOVERY_SAMPLE object sẽ được đo. Mọi đại
+#   lượng đo chỉ phụ thuộc anchor và shard của chính object đó, nên kết quả
+#   tương đương về phân phối mà nhanh hơn ~NUM_FILES/RECOVERY_SAMPLE lần.
+#   Danh sách object giống hệt bản cũ (cùng SAMPLE_SEED).
+# OUT_JSON: ghi bảng kết quả ra file JSON ngoài phần in ra màn hình.
+NET_SEED = _os.environ.get("NET_SEED")
+INGEST_SAMPLE_ONLY = _os.environ.get("INGEST_SAMPLE_ONLY", "0") == "1"
+OUT_JSON = _os.environ.get("OUT_JSON")
 
 NUM_NODES = int(_os.environ.get("NUM_NODES", "10000"))
 NUM_FILES = int(_os.environ.get("NUM_FILES", "20000"))  # code=20000, scifact=5183
@@ -42,6 +59,13 @@ def kill_random_nodes(network_nodes, target_ratio, total_nodes):
     network_nodes[:] = [node for node in network_nodes if node not in killed]
     for node in network_nodes:
         node.routing_table.difference_update(killed)
+        # Ở overlay k-bucket, lookup đọc kbuckets chứ không đọc routing_table.
+        # Không gỡ thì peer chết vẫn được hỏi, vẫn trả contact và vẫn "giữ"
+        # metadata. Gỡ ngay là cùng ngữ nghĩa với nhánh ring ở trên. Overlay ring
+        # không có kbuckets nên dòng này không đổi gì ở đó.
+        if node.kbuckets:
+            for _i, _b in node.kbuckets.items():
+                node.kbuckets[_i] = [p for p in _b if p not in killed]
     return len(killed)
 
 
@@ -108,19 +132,32 @@ def count_recovered_files(network_nodes, doc_ids, vectors):
 
 
 def run_churn_test(env):
+    import src.network as _netmod
+    _bs = f" BOOTSTRAP={_netmod.BOOTSTRAP}" if _netmod.ROUTING_TABLE == "kbucket" else ""
+    print(f"[*] ROUTING_TABLE={_netmod.ROUTING_TABLE}{_bs} "
+          f"NET_SEED={NET_SEED} SAMPLE_SEED={SAMPLE_SEED} "
+          f"INGEST_SAMPLE_ONLY={int(INGEST_SAMPLE_ONLY)} r={METADATA_ANCHORS}")
     print("[*] Khoi tao mang P2P...")
     network_nodes = yield env.process(bootstrap_network(env, NUM_NODES, K_SIZE))
+    _contacts = [len(n.routing_table) for n in network_nodes]
 
+    # Cùng danh sách với bản cũ: random.Random(s).sample == random.seed(s); random.sample
+    _pre = None
+    if INGEST_SAMPLE_ONLY:
+        _pre = random.Random(SAMPLE_SEED).sample(range(NUM_FILES),
+                                                 min(RECOVERY_SAMPLE, NUM_FILES))
     print("[*] Dang phan bo du lieu...")
     yield env.process(data_ingestion_process(
         env, network_nodes, NUM_FILES, SHARDS_PER_FILE,
         embeddings_path=EMBEDDINGS_PATH, pq_codes_path=PQ_CODES_PATH,
-        data_label=DATASET.upper()))
+        data_label=DATASET.upper(), doc_ids=_pre))
 
     vectors = np.load(EMBEDDINGS_PATH)
 
     random.seed(SAMPLE_SEED)
     doc_ids = random.sample(range(NUM_FILES), min(RECOVERY_SAMPLE, NUM_FILES))
+    if _pre is not None and _pre != doc_ids:
+        raise SystemExit("INGEST_SAMPLE_ONLY: danh sách object lệch với bản cũ")
 
     print("\n" + "=" * 70)
     print(f"THI NGHIEM: NODE FAILURE TINH (r={METADATA_ANCHORS}, {len(doc_ids)} object mau)")
@@ -131,14 +168,36 @@ def run_churn_test(env):
 
     total_nodes = len(network_nodes)
     n = len(doc_ids)
+    rows = []
     for churn_ratio in CHURN_STEPS:
         kill_random_nodes(network_nodes, churn_ratio, total_nodes)
         meta_ok, payload_ok, e2e_ok = count_recovered_files(network_nodes, doc_ids, vectors)
         print(f"{churn_ratio:>9.0%} {100*meta_ok/n:>11.1f}% {100*payload_ok/n:>11.1f}% "
               f"{100*e2e_ok/n:>11.1f}%")
+        rows.append({"loss": churn_ratio, "metadata": 100 * meta_ok / n,
+                     "payload": 100 * payload_ok / n, "e2e": 100 * e2e_ok / n})
+
+    if OUT_JSON:
+        import json
+        with open(OUT_JSON, "w") as fh:
+            json.dump({"dataset": DATASET, "r": METADATA_ANCHORS, "nodes": NUM_NODES,
+                       "num_files": NUM_FILES, "sample": n,
+                       "routing_table": _netmod.ROUTING_TABLE,
+                       "bootstrap": _netmod.BOOTSTRAP, "net_seed": NET_SEED,
+                       "sample_seed": SAMPLE_SEED,
+                       "ingest_sample_only": INGEST_SAMPLE_ONLY,
+                       "contacts_mean": float(np.mean(_contacts)),
+                       "contacts_min": int(np.min(_contacts)),
+                       "rows": rows}, fh, indent=2)
+        print(f"-> Lưu: {OUT_JSON}")
 
 
 if __name__ == "__main__":
+    if NET_SEED is not None:
+        from src.routing import initialize_lsh_projections
+        random.seed(int(NET_SEED))
+        np.random.seed(int(NET_SEED) % (2**32))
+        initialize_lsh_projections(int(NET_SEED))
     env = simpy.Environment()
     env.process(run_churn_test(env))
     env.run()

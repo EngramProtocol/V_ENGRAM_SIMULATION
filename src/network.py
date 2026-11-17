@@ -71,6 +71,11 @@ SHARED_ORIGIN = _os.environ.get("SHARED_ORIGIN", "1") == "1"
 # Chẩn đoán mỗi truy vấn: peer set của từng probe và thứ hạng XOR, để tính
 # Jaccard giữa các probe và độ đa dạng ứng viên.
 _PROBE_DIAG = []
+# ppna-r1: DIAG_BUILD=1 ghi lại (semantic key, anchor đã chọn) lúc ingest để đo
+# tỉ lệ record được đặt đúng tại peer XOR-gần nhất (src/diag.py). Chỉ ghi, không
+# dùng số ngẫu nhiên, nên không đổi kết quả.
+DIAG_BUILD = _os.environ.get("DIAG_BUILD", "0") == "1"
+INGEST_LOG = []
 
 # --- MC10: chế độ đặt payload shard ---
 #   scan (mặc định, hành vi cũ): đi dọc danh sách ứng viên, đặt vào node đầu
@@ -150,7 +155,7 @@ def bootstrap_network(env, num_nodes, k_size_far=50, k_size_near=50):
                 # tra chính mình bằng lookup thật trên mạng đã có
                 found, _h, _r = iterative_find_k_closest_nodes(
                     node.node_id, boot, alpha=DEFAULT_ALPHA,
-                    k=K_BUCKET, max_rounds=DEFAULT_R_MAX)
+                    k=K_BUCKET, phase="join")
                 for peer in found:
                     node.kb_add(peer, K_BUCKET)
                     peer.kb_add(node, K_BUCKET)   # học hai chiều
@@ -160,7 +165,7 @@ def bootstrap_network(env, num_nodes, k_size_far=50, k_size_near=50):
                 boot = random.choice(network_nodes)
                 found, _h, _r = iterative_find_k_closest_nodes(
                     node.node_id, boot, alpha=DEFAULT_ALPHA,
-                    k=K_BUCKET, max_rounds=DEFAULT_R_MAX)
+                    k=K_BUCKET, phase="join")
                 for peer in found:
                     node.kb_add(peer, K_BUCKET)
 
@@ -201,7 +206,10 @@ def data_ingestion_process(
     embeddings_path="./data/code_corpus_embeddings.npy",
     pq_codes_path="./data/code_pq_codes.npy",
     data_label="CODE",
+    doc_ids=None,
 ):
+    """doc_ids=None ingest mọi object 0..num_files-1 như cũ. Truyền một danh sách
+    chỉ số thì chỉ ingest các object đó (main_churn_test dùng khi chỉ cần đo mẫu)."""
     print("\n" + "=" * 60)
     print(
         f"GIAI ĐOẠN 2: PHÂN BỔ DỮ LIỆU {data_label} (TWO-TIER: METADATA L-replica + PAYLOAD-ONCE)"
@@ -213,7 +221,8 @@ def data_ingestion_process(
     total_shards = 0       # tong so payload shard da dat (ky vong = num_files * shards_per_file)
     total_anchors = 0      # tong so ban sao metadata (ky vong ~ num_files * L * METADATA_ANCHORS)
 
-    for i in range(num_files):
+    _docs = range(num_files) if doc_ids is None else list(doc_ids)
+    for _n_done, i in enumerate(_docs):
         vector = vectors[i]
         pq_code = pq_codes[i]  # 256 Bytes
         tag = f"doc_{i}"
@@ -230,8 +239,11 @@ def data_ingestion_process(
         for s_key in s_keys:
             bootstrap_node = random.choice(network_nodes)
             anchors, _, _ = iterative_find_k_closest_nodes(
-                s_key, bootstrap_node, alpha=DEFAULT_ALPHA, k=METADATA_ANCHORS
+                s_key, bootstrap_node, alpha=DEFAULT_ALPHA, k=METADATA_ANCHORS,
+                phase="ingest"
             )
+            if DIAG_BUILD:
+                INGEST_LOG.append((s_key, [a.node_id for a in anchors[:METADATA_ANCHORS]]))
             for anchor in anchors[:METADATA_ANCHORS]:
                 anchor.store_metadata(tag, pq_code)
                 total_anchors += 1
@@ -246,7 +258,8 @@ def data_ingestion_process(
 
             bootstrap_node = random.choice(network_nodes)
             candidates, _, _ = iterative_find_k_closest_nodes(
-                p_key, bootstrap_node, alpha=DEFAULT_ALPHA, k=PLACEMENT_K
+                p_key, bootstrap_node, alpha=DEFAULT_ALPHA, k=PLACEMENT_K,
+                phase="payload"
             )
             if not candidates:
                 candidates = [bootstrap_node]
@@ -272,8 +285,8 @@ def data_ingestion_process(
                         break
 
         yield env.timeout(_rtt())
-        if (i + 1) % 5000 == 0:
-            print(f"  ... Đã phân bổ {i + 1:,}/{num_files:,} files.")
+        if (_n_done + 1) % 5000 == 0:
+            print(f"  ... Đã phân bổ {_n_done + 1:,}/{len(_docs):,} files.")
 
     print(
         f"✓ Hoàn tất: {total_shards:,} payload shard (đặt 1 lần) "
@@ -289,7 +302,7 @@ def _fetch_one_shard(env, tag, s_id, network_nodes, acc: Dict[str, Any]):
     p_key = generate_placement_key(tag, s_id)
     bootstrap_node = random.choice(network_nodes)
     candidate_nodes, ph, pr = iterative_find_k_closest_nodes(
-        p_key, bootstrap_node, alpha=DEFAULT_ALPHA, k=PLACEMENT_K
+        p_key, bootstrap_node, alpha=DEFAULT_ALPHA, k=PLACEMENT_K, phase="payload"
     )
     # Lookup của payload cũng TIÊU thời gian, y như lookup của discovery. Bản
     # trước chỉ sửa cho discovery nên bảng chi phí nửa vời: đường tới hạn tính
@@ -438,7 +451,7 @@ def query_pipeline_process(env, network_nodes, query_vector, codebook, target_k=
             bootstrap_node = _borigin if SHARED_ORIGIN else random.choice(network_nodes)
             nodes, hops, rpcs = iterative_find_k_closest_nodes(
                 r_key, bootstrap_node, alpha=DEFAULT_ALPHA,
-                k=k_query, max_rounds=DEFAULT_R_MAX
+                k=k_query, max_rounds=DEFAULT_R_MAX, phase="query"
             )
             total_hops += hops; total_rpcs += rpcs
             disc_rounds += hops; disc_rpcs += rpcs
@@ -482,7 +495,7 @@ def query_pipeline_process(env, network_nodes, query_vector, codebook, target_k=
             bootstrap_node = _origin if SHARED_ORIGIN else random.choice(network_nodes)
             nodes, hops, rpcs = iterative_find_k_closest_nodes(
                 p_key, bootstrap_node, alpha=DEFAULT_ALPHA,
-                k=k_query, max_rounds=DEFAULT_R_MAX
+                k=k_query, max_rounds=DEFAULT_R_MAX, phase="query"
             )
             for _ in range(hops):          # mỗi vòng định tuyến một RTT
                 yield env.timeout(_rtt())
@@ -579,7 +592,8 @@ def query_pipeline_process(env, network_nodes, query_vector, codebook, target_k=
                 p_key = generate_placement_key(tag, s_id)
                 bootstrap_node = random.choice(network_nodes)
                 candidate_nodes, _ph, _pr = iterative_find_k_closest_nodes(
-                    p_key, bootstrap_node, alpha=DEFAULT_ALPHA, k=PLACEMENT_CANDIDATES
+                    p_key, bootstrap_node, alpha=DEFAULT_ALPHA, k=PLACEMENT_CANDIDATES,
+                    phase="payload"
                 )
                 pay_rounds += _ph
                 pay_rpcs += _pr

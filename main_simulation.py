@@ -61,6 +61,24 @@ DATASETS = {
 SHARDS_PER_FILE = 30
 K_SIZE = 20
 
+# ppna-r1: BUILD_ONLY=1 dựng mạng, ingest, đo chẩn đoán (src/diag.py) rồi ghi
+# JSON và dừng, không chạy truy vấn. Dùng để đo vị trí record và bảng định
+# tuyến của từng biến thể quy tắc dừng mà không tốn phần truy vấn.
+BUILD_ONLY = _os.environ.get("BUILD_ONLY", "0") == "1"
+
+
+def _rules_tag():
+    """Hậu tố tên file khi quy tắc join/ingest khác quy tắc truy vấn. Rỗng nếu
+    không đặt JOIN_* / INGEST_*, nên tên file cũ giữ nguyên."""
+    from src import routing as _rt
+    q = _rt.phase_rules(None)
+    tag = ""
+    for ph, short in (("join", "J"), ("ingest", "I")):
+        rr = _rt.phase_rules(ph)
+        if rr != q:
+            tag += f"_{short}{rr[0]}-{rr[1]}-R{rr[2]}"
+    return tag
+
 
 def run_simulation(env, args, cfg):
     codebook = np.load(cfg["cb"])
@@ -92,6 +110,30 @@ def run_simulation(env, args, cfg):
     print(f"\n[METADATA LOAD] mean={meta.mean():.1f} P95={np.percentile(meta,95):.0f} "
           f"P99={np.percentile(meta,99):.0f} max={meta.max()} Gini={gini:.3f} "
           f"| tổng={meta.sum():,} bản")
+
+    # ---- ppna-r1: chẩn đoán pha dựng mạng và ingest ----
+    diag = {}
+    if netmod.DIAG_BUILD or BUILD_ONLY:
+        from src.diag import build_diagnostics
+        diag = build_diagnostics(network_nodes, netmod.INGEST_LOG, netmod.METADATA_ANCHORS)
+        print(f"[DIAG] quy tắc {_rt.rules_summary()}")
+        print(f"[DIAG] {diag}")
+        print(f"[DIAG] lookup theo pha {_rt.lookup_stats_summary()}")
+    if BUILD_ONLY:
+        from src.routing import NUM_PROJECTIONS as _Lb
+        out = {"dataset": args.dataset, "seed": args.seed, "nodes": args.nodes,
+               "num_files": args.num_files, "r": netmod.METADATA_ANCHORS,
+               "num_tables": _Lb, "build_only": True,
+               "routing_table": netmod.ROUTING_TABLE, "bootstrap": netmod.BOOTSTRAP,
+               "rules": _rt.rules_summary(), "lookup_stats": _rt.lookup_stats_summary(),
+               "metadata_gini": gini, "metadata_total": int(meta.sum()), **diag}
+        fn = args.out or (f"build_{args.dataset}_N{args.nodes}_r{netmod.METADATA_ANCHORS}"
+                          f"_{_rt.STOP_RULE}-{_rt.FRONTIER_SCOPE}{_rules_tag()}"
+                          f"_s{args.seed}.json")
+        with open(fn, "w") as _f:
+            json.dump(out, _f, indent=2, default=float)
+        print(f"\n-> Lưu (BUILD_ONLY): {fn}")
+        return
 
     for doc_id in [12, 99, 256, 512, 1024, 2048, 4096, 8192, 12345, 19999]:
         if doc_id < args.num_files:
@@ -232,7 +274,11 @@ def run_simulation(env, args, cfg):
            "lookups_at_cap": int(sum(s.get("lookups_at_cap",0) for s in all_stats)),
            "mean_contacted": float(np.mean([s["contacted_nodes"] for s in all_stats])),
            "mean_candidates": float(np.mean(uniq_cands)),
-           "metadata_gini": gini, "metadata_total": int(meta.sum())}
+           "metadata_gini": gini, "metadata_total": int(meta.sum()),
+           # ppna-r1: quy tắc từng pha, thống kê lookup theo pha, chẩn đoán dựng mạng
+           "rules": _rt.rules_summary(),
+           "lookup_stats": _rt.lookup_stats_summary(),
+           **diag}
     from src.routing import DEFAULT_R_MAX as _RMAX, NUM_PROJECTIONS as _L
     fn = args.out or (f"result_full_{args.dataset}_N{args.nodes}_L{_L}"
                       f"_r{netmod.METADATA_ANCHORS}_K{args.k_query}_T{args.multi_probe}"
@@ -243,7 +289,7 @@ def run_simulation(env, args, cfg):
                       # trong tên file. Thiếu STOP_RULE/FRONTIER_SCOPE thì bốn
                       # cấu hình 2x2 ghi đè lên nhau và số đọc ra là của lần
                       # chạy cuối, không phải của cấu hình đang xét.
-                      f"_{_rt.STOP_RULE}-{_rt.FRONTIER_SCOPE}"
+                      f"_{_rt.STOP_RULE}-{_rt.FRONTIER_SCOPE}{_rules_tag()}"
                       f"{'_nopay' if netmod.SKIP_PAYLOAD else ''}"
                       f"_{netmod.ROUTING_MODE if netmod.ROUTING_MODE != 'auto' else ('random_slots' if args.random_routing else 'semantic')}"
                       f"_{netmod.PLACEMENT_MODE}{netmod.PLACEMENT_K}"
@@ -366,6 +412,8 @@ if __name__ == "__main__":
         args.num_files = cfg["n"]
     if args.meta_anchors is not None:
         netmod.METADATA_ANCHORS = args.meta_anchors
+    if BUILD_ONLY:
+        netmod.DIAG_BUILD = True      # BUILD_ONLY luôn cần log anchor để đo vị trí record
 
     import random as _r
     _r.seed(args.seed)
