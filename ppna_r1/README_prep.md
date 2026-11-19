@@ -9,13 +9,14 @@ Dựng các bộ dữ liệu mới mà đợt 1 cần, chạy hết trên server
 | p1 | `{code,scifact}_val_query_embeddings.npy`, `{code,scifact}_val_ground_truth.json`: 500 query validation mỗi corpus | R1-5, chọn độ rộng Bucket-LSH trên tập tách khỏi tập đánh giá | 10 đến 20 phút (phần lớn là tải parquet CodeSearchNet) |
 | p3 | `code30k`, `code40k`, `code70k`: corpus trung gian cho 15.000, 20.000 và 35.000 peer | R1-3, weak scaling | 10 đến 20 phút |
 | p4 | `{code,scifact}_pq_{codebook,codes}_m64.npy`, `_m128.npy` | R1-1, sweep PQ | khoảng 10 phút |
-| e5 | `code_e5`, `scifact_e5`: intfloat/e5-large-v2, 1024 chiều, PQ m = 512 | R1-4 | 1,5 đến 4 giờ trên CPU |
-| jina | `code_jina`: jinaai/jina-code-embeddings-0.5b, 896 chiều, PQ m = 448 | R1-4 | 2 đến 5 giờ trên CPU |
+| e5 | `code_e5`, `scifact_e5`: intfloat/e5-large-v2, 1024 chiều, PQ m = 512 | R1-4 | khoảng 8 giờ trên CPU 8 nhân (smoke đo 370 phút cho code, 103 phút cho SciFact) |
+| jina | `code_jina`: jinaai/jina-code-embeddings-0.5b, 896 chiều, PQ m = 448 | R1-4 | ước 7 đến 9 giờ trên CPU 8 nhân khi chạy float32 |
 
 Bước smoke chạy trước tất cả (khoảng 15 phút): tải model và dữ liệu, nhúng thử vài chục văn bản, in thời gian ước cho e5 và jina. Smoke lỗi thì script dừng, không tốn giờ máy.
 
 Các điểm cần biết:
 - **Query validation.** p1 dựng lại corpus code 20.000 hàm từ parquet CodeSearchNet và kiểm khớp từng văn bản với `data/code_corpus_texts.json`; kiểm 500 query đánh giá trùng câu đầu docstring của hàm nguồn; với SciFact kiểm 500 claim đánh giá có trong bộ claim tải về. Query validation không trùng query đánh giá nào. Trước khi nhúng, p1 nhúng lại các query đánh giá bằng BGE và so với file đã có, để chắc embedding trên server cùng không gian với bản gốc.
+- **Kiểu dữ liệu.** Mọi model chạy float32 như BGE và Evo-Engram. Checkpoint của jina lưu bfloat16 và transformers 5 giữ kiểu đó khi nạp; bản đầu của patch vì thế chạy jina bằng bfloat16, smoke đo 4,4 giây mỗi văn bản (ước 1.479 phút cho corpus), gấp khoảng bốn lần e5 dù khối lượng tính chỉ hơn khoảng 15%. Bản sửa ép float32, ghi kiểu dữ liệu vào log và dùng thư mục khối riêng `*_fp32`.
 - **Model khác.** Corpus và query giữ nguyên văn bản của bộ BGE. e5 dùng tiền tố `query: ` và `passage: ` như Evo-Engram; jina dùng prompt `nl2code` của model. Cả ba model cắt ở 512 token. Ground truth là top-10 chính xác trong không gian của chính model đó.
 - **Corpus trung gian.** Cỡ S là S dòng đầu của `code100k`, query là 500 query của bộ code, ground truth và PQ dựng riêng cho từng cỡ. p3 dựng lại `code50k` bằng cùng quy trình và so với bản của notebook trước khi dựng cỡ mới.
 - File mới không bị git theo dõi (`.gitignore` đã có `data/*.npy`, `data/*.json`); `data/manifest.json` không bị sửa, thông tin bộ mới ghi vào `data/manifest_r1.json`.

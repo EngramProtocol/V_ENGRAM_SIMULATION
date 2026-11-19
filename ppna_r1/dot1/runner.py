@@ -4,11 +4,12 @@
 
 - Job đã có file kết quả kèm file .ok ghi đúng commit hiện tại thì bỏ qua. Chạy
   lại cùng lệnh sau khi bị ngắt: chỉ các job chưa xong được chạy.
-- Job thiếu file dữ liệu thì không chạy, ghi "thiếu dữ liệu" và liệt kê ở cuối.
+- Job thiếu file dữ liệu thì không chạy, ghi "thiếu dữ liệu" và liệt kê ở cuối. Job chỉ thiếu
+  dữ liệu của bước e5 và jina (jobs.DEFERRED_DATA) được ghi là "chờ dữ liệu" và không tính lỗi.
 - Mỗi job một nhân (OMP/OpenBLAS/MKL = 1 luồng), log riêng trong logs_dot1/.
 - Job overlay lớn (>= 35.000 peer) chạy tối đa --big-parallel cái cùng lúc, và chỉ
   khởi động khi RAM trống còn ít nhất --min-free-gb.
-- Mã thoát 0 khi mọi job xong; 1 nếu còn job lỗi, quá giờ hoặc thiếu dữ liệu.
+- Mã thoát 0 khi mọi job chạy được đều xong; 1 nếu còn job lỗi, quá giờ hoặc thiếu dữ liệu.
 """
 import argparse
 import json
@@ -18,6 +19,9 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from jobs import missing_inputs, waits_for_prep  # noqa: E402
 
 
 def utc():
@@ -94,16 +98,21 @@ def main():
 
     done = [j for j in jobs if is_done(j, commit)]
     todo = [j for j in jobs if not is_done(j, commit)]
-    missing = [j for j in todo if any(not os.path.exists(p) for p in j['needs'])]
-    miss_ids = {j['id'] for j in missing}
-    todo = [j for j in todo if j['id'] not in miss_ids]
+    lacking = [j for j in todo if missing_inputs(j)]
+    wait = [j for j in lacking if waits_for_prep(j)]          # chờ bước e5, jina của prep
+    missing = [j for j in lacking if not waits_for_prep(j)]   # thiếu dữ liệu thật
+    skip_ids = {j['id'] for j in lacking}
+    todo = [j for j in todo if j['id'] not in skip_ids]
     # ưu tiên trước, trong cùng mức ưu tiên thì job dài trước (giảm đuôi chờ)
     todo.sort(key=lambda j: (j['prio'], -j['est']))
     say(f'commit {commit} | {len(jobs)} job: {len(done)} đã xong, {len(todo)} cần chạy, '
-        f'{len(missing)} thiếu dữ liệu | parallel {a.parallel}, big {a.big_parallel}')
+        f'{len(missing)} thiếu dữ liệu, {len(wait)} chờ dữ liệu e5/jina | '
+        f'parallel {a.parallel}, big {a.big_parallel}')
     for j in missing:
-        lack = [p for p in j['needs'] if not os.path.exists(p)]
-        say(f'  thiếu dữ liệu: {j["id"]} ({", ".join(lack[:3])})')
+        say(f'  thiếu dữ liệu: {j["id"]} ({", ".join(missing_inputs(j)[:3])})')
+    if wait:
+        say(f'  chờ dữ liệu e5/jina: {len(wait)} job (ví dụ {wait[0]["id"]}); chạy lại '
+            f'run_dot1.sh sau khi bước chuẩn bị dữ liệu xong thì các job này mới chạy')
     if a.dry_run or not todo:
         say('không có job nào cần chạy' if not todo else 'dry run, không chạy')
         return 0 if not missing else 1
@@ -211,7 +220,8 @@ def main():
         return 130
 
     say(f'KẾT THÚC: {len(results["ok"])} xong, {len(results["fail"])} lỗi, '
-        f'{len(results["timeout"])} quá giờ, {len(missing)} thiếu dữ liệu')
+        f'{len(results["timeout"])} quá giờ, {len(missing)} thiếu dữ liệu, '
+        f'{len(wait)} chờ dữ liệu e5/jina')
     for k in ('fail', 'timeout'):
         for x in results[k]:
             say(f'  {k}: {x}')

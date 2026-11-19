@@ -39,6 +39,16 @@ SPECS = {
 }
 
 
+def cpu_has_bf16():
+    """CPU có lệnh bfloat16 (avx512_bf16 hoặc amx_bf16) không; chỉ để ghi log."""
+    try:
+        with open("/proc/cpuinfo") as fh:
+            flags = fh.read()
+        return ("avx512_bf16" in flags) or ("amx_bf16" in flags)
+    except OSError:
+        return None
+
+
 def make_encoders(spec, fake=False):
     """Trả về (enc_query, enc_doc, info). fake=True chỉ dùng để thử pipeline cục bộ."""
     if fake:
@@ -60,6 +70,15 @@ def make_encoders(spec, fake=False):
         kw["tokenizer_kwargs"] = {"padding_side": "left"}
     log(f"nạp {spec['hf']} trên {dev}, {nthreads} luồng")
     model = SentenceTransformer(spec["hf"], **kw)
+    # transformers 5 nạp model theo kiểu dữ liệu lưu trong checkpoint. Checkpoint của jina
+    # lưu bfloat16, nên bản trước chạy jina bằng bfloat16: smoke trên server đo chậm gấp
+    # khoảng bốn lần e5 dù khối lượng tính chỉ hơn khoảng 15%, và số khác float32.
+    # Mọi model chạy float32, như BGE và Evo-Engram.
+    model = model.float()
+    dtype = str(next(model.parameters()).dtype)
+    if dtype != "torch.float32":
+        die(f"{spec['hf']} vẫn chạy {dtype} sau khi ép float32")
+    log(f"kiểu dữ liệu {dtype}; CPU có lệnh bfloat16: {cpu_has_bf16()}")
     model.max_seq_length = spec["max_len"]
     prompts = dict(getattr(model, "prompts", {}) or {})
     use_prompts = spec.get("prompt_q") in prompts and spec.get("prompt_d") in prompts
@@ -68,7 +87,8 @@ def make_encoders(spec, fake=False):
     except Exception:  # noqa: BLE001
         dim = 0
     info = {"device": dev, "threads": nthreads, "max_seq_length": model.max_seq_length,
-            "dim": dim, "prompt_mode": "prompt_name" if use_prompts else "prefix"}
+            "dim": dim, "prompt_mode": "prompt_name" if use_prompts else "prefix",
+            "dtype": dtype, "cpu_bf16": cpu_has_bf16()}
     if use_prompts:
         info["prompts"] = {k: prompts[k] for k in (spec["prompt_q"], spec["prompt_d"])}
 
@@ -127,7 +147,8 @@ def run_model(key, smoke=False, fake=False):
             res["datasets"][name] = r
             continue
         t0 = time.time()
-        Ec = encode_chunked(enc_d, texts, CACHE / f"{name}_corpus", chunk=1000, label=name)
+        # thư mục khối riêng cho float32: không bao giờ trộn khối của hai kiểu dữ liệu
+        Ec = encode_chunked(enc_d, texts, CACHE / f"{name}_corpus_fp32", chunk=1000, label=name)
         t_corpus = time.time() - t0
         Eq = enc_q(queries)
         if Ec.shape != (len(texts), spec["dim"]) or Eq.shape != (len(queries), spec["dim"]):

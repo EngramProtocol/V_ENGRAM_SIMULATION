@@ -49,7 +49,11 @@ cho kết quả trùng từng số với code trước patch. Báo cáo tổng h
 
 ## Điều kiện trước khi chạy
 
-- Bước chuẩn bị dữ liệu (`ppna-r1-prep`) đã xong: dòng cuối `ppna_r1/prep_report.txt` là `KẾT LUẬN: 0 lỗi`.
+- Bước chuẩn bị dữ liệu (`ppna-r1-prep`) đã xong **p1, p3 và p4**:
+  `grep "p4 mã thoát 0" ppna_r1/logs_prep/run.log` in ra một dòng.
+- **Chưa cần e5 và jina.** 150 job của nhóm r14 dùng hai bộ này được để "chờ dữ liệu": smoke
+  test và runner không báo lỗi vì chúng. Gọi lại `run_dot1.sh` sau khi bước chuẩn bị xong thì
+  chỉ các job đó chạy và báo cáo được làm lại. Lệnh chạy ở dưới nối sẵn ba bước này.
 - Dữ liệu cũ vẫn ở `data/`: code, scifact, squad, code50k, code100k.
 - Nên còn `ppna_r1/out_verify_norm`, `ppna_r1/out_verify_s2` và các file `churn_code_N10000_*.json`
   của bản đã nộp: script tổng hợp dùng chúng để so hồi quy. Thiếu thì chỉ bỏ phần so đó.
@@ -59,67 +63,82 @@ cho kết quả trùng từng số với code trước patch. Báo cáo tổng h
 ```bash
 cd ~/V_Engram_Simulation
 git checkout main && git pull
-git log --oneline -1                     # phải là: ppna r1: chuan bi du lieu dot 1 tren server (thay Colab)
-git am ~/Downloads/0002-ppna-r1-dot-1*.patch
-sha256sum -c ppna_r1/SHA256SUMS_dot1     # mọi dòng OK
+git am ~/Downloads/0002-ppna-r1-dot-1*.patch     # bỏ dòng này nếu đã áp 0002
+git am ~/Downloads/0003-ppna-r1-*.patch
+sha256sum -c ppna_r1/SHA256SUMS_dot1 ppna_r1/SHA256SUMS_prep    # mọi dòng OK
+git tag -d ppna-r1-dot1 2>/dev/null; git push origin :refs/tags/ppna-r1-dot1 2>/dev/null   # chỉ có tác dụng nếu đã tạo tag ở 0002
 git tag -a ppna-r1-dot1 -m "ppna r1: dot 1"
 git push origin main --tags
 ```
 
 ## Trên server
 
-**1. Lấy code** (sau khi bước chuẩn bị dữ liệu đã xong)
+**1. Dừng bước chuẩn bị sau p4.** Khi `ppna_r1/logs_prep/run.log` đã có `p4 mã thoát 0`
+(bước e5 vừa bắt đầu hoặc chưa), dừng nó; e5 và jina sẽ chạy lại bằng code mới ở bước 3.
+
+```bash
+grep "p4 mã thoát 0" ~/V_ENGRAM_SIMULATION/ppna_r1/logs_prep/run.log && tmux kill-session -t prep
+```
+
+**2. Lấy code**
 
 ```bash
 cd ~/V_ENGRAM_SIMULATION
 git status --short | grep -v '^??'      # không in gì
-git fetch origin --tags && git checkout ppna-r1-dot1
-sha256sum -c ppna_r1/SHA256SUMS_dot1
-tail -1 ppna_r1/prep_report.txt          # KẾT LUẬN: 0 lỗi
+git fetch origin --tags --force && git checkout ppna-r1-dot1
+sha256sum -c ppna_r1/SHA256SUMS_dot1 ppna_r1/SHA256SUMS_prep
 free -g; df -h .                         # cần trống khoảng 2 GB đĩa
 ```
 
-**2. Chạy**
+**3. Chạy** (một lệnh cho cả ba bước: đợt 1 không có e5, jina; nhúng e5 và jina; phần còn lại của đợt 1)
 
 ```bash
 [ -f venv/bin/activate ] && source venv/bin/activate
-tmux new -s dot1 -d "bash ~/V_ENGRAM_SIMULATION/ppna_r1/run_dot1.sh"
+tmux new -s dot1 -d "bash ~/V_ENGRAM_SIMULATION/ppna_r1/run_dot1.sh; bash ~/V_ENGRAM_SIMULATION/ppna_r1/run_prep.sh; bash ~/V_ENGRAM_SIMULATION/ppna_r1/run_dot1.sh"
 ```
 
-Script tự dùng `venv/bin/python` nếu có. Mặc định chạy `nproc − 1` job song song; overlay
-từ 35.000 peer trở lên chạy tối đa 3 job cùng lúc và chỉ khởi động khi RAM trống còn
-từ 3 GB. Đổi bằng `PARALLEL=6`, `BIG_PARALLEL=2`, `MIN_FREE_GB=4` đặt trước `bash`.
+`run_dot1.sh` tự dùng `venv/bin/python`, `run_prep.sh` dùng `venv_prep/bin/python`. Mặc định chạy
+`nproc − 1` job song song; overlay từ 35.000 peer trở lên chạy tối đa 3 job cùng lúc và chỉ
+khởi động khi RAM trống còn từ 3 GB. Đổi bằng `PARALLEL=6`, `BIG_PARALLEL=2`, `MIN_FREE_GB=4`
+đặt trước `bash`. Ba bước chạy nối tiếp nên không tranh nhân với nhau.
+
+Thời gian ước: lần đợt 1 thứ nhất 6 đến 7 giờ; e5 khoảng 8 giờ (smoke đo 370 phút cho code,
+103 phút cho SciFact); jina chạy float32 ước 7 đến 9 giờ; lần đợt 1 thứ hai khoảng 30 phút.
 
 **Kiểm sau khoảng 10 phút** (smoke test đã xong):
 
 ```bash
-cat ppna_r1/logs_dot1/smoke/check.txt    # dòng cuối: SMOKE CHECK: 23/23 đạt
+cat ppna_r1/logs_dot1/smoke/check.txt    # dòng cuối: SMOKE CHECK: 20/20 đạt, 3 chờ dữ liệu e5/jina
 tail -3 ppna_r1/logs_dot1/run.log        # đã sang phần chạy chính, có số job và thời gian ước
 ```
 
-Smoke test lỗi thì script dừng; gửi thư mục `ppna_r1/logs_dot1/smoke`.
+Smoke test lỗi thì script dừng ở bước đó và chạy sang bước sau của lệnh tmux; gửi thư mục
+`ppna_r1/logs_dot1/smoke`.
 
 **Theo dõi:** `tail -5 ppna_r1/logs_dot1/run.log`. Mỗi dòng ghi job vừa xong, mã thoát,
-số job còn lại và thời gian ước. Job lỗi có dòng `xem ...log`.
+số job còn lại và thời gian ước. Job lỗi có dòng `xem ...log`. Khi sang bước nhúng:
+`tail -3 ppna_r1/logs_prep/e5.log` hoặc `jina.log` in số văn bản đã nhúng và số phút còn lại.
 
-**Khi xong** (dòng cuối `run.log` là `XONG ĐỢT 1`):
+**Gửi kết quả hai lần.** Lần đầu khi `run.log` có dòng `XONG ĐỢT 1` thứ nhất (máy đang sang
+bước nhúng, không cần dừng); lần hai khi có dòng `XONG ĐỢT 1` thứ hai.
 
 ```bash
-tail -15 ppna_r1/dot1_report.txt         # dòng "KẾT LUẬN: k vấn đề" và danh sách vấn đề
+grep -c "XONG ĐỢT 1" ppna_r1/logs_dot1/run.log   # 1 rồi 2
+tail -15 ppna_r1/dot1_report.txt         # dòng "KẾT LUẬN: k vấn đề" (lần đầu kèm "150 job chờ dữ liệu e5/jina")
 tar czf ~/vengram_dot1.tar.gz ppna_r1/out_dot1 ppna_r1/logs_dot1 ppna_r1/dot1_report.txt \
-    ppna_r1/dot1_summary.json
+    ppna_r1/dot1_summary.json ppna_r1/logs_prep ppna_r1/prep_report.txt data/manifest_r1.json
 sha256sum ~/vengram_dot1.tar.gz
 ```
 
-Gửi file tar.gz (khoảng 5 đến 10 MB).
+Gửi file tar.gz (khoảng 5 đến 10 MB). Lần đầu chưa có `prep_report.txt` thì tar báo thiếu
+file đó, vẫn tạo được file nén.
 
 ## Khi cần
 
 - **Bị ngắt** (mất điện, tmux đóng): chạy lại đúng lệnh tmux ở trên. Job đã xong với cùng
-  commit được bỏ qua; job đang dở chạy lại từ đầu.
+  commit được bỏ qua; job đang dở chạy lại từ đầu; bước nhúng chạy tiếp từ khối 1.000 văn bản cuối.
 - **Chạy riêng vài nhóm:** `RUN_GROUPS="t4 lsh val"` đặt trước `bash`. Chỉ tổng hợp lại:
   `STAGES=report bash ppna_r1/run_dot1.sh`.
-- **Một bước chuẩn bị dữ liệu bị lỗi** (ví dụ jina): smoke test sẽ báo thiếu dữ liệu.
-  Báo lại; nếu cần chạy trước phần còn lại thì dùng `STAGES="run report"`, các job thiếu
-  dữ liệu được bỏ qua và liệt kê trong `run.log`.
+- **Bước e5 hoặc jina lỗi:** các job r14 tương ứng vẫn ở trạng thái chờ dữ liệu; báo lại kèm
+  `ppna_r1/logs_prep`.
 - **Không chạy job nặng khác** trên server trong lúc chạy: mỗi job chiếm một nhân.

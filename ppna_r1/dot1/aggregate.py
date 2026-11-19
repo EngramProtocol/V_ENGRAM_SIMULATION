@@ -248,11 +248,17 @@ def completeness(st):
         problem(f'{len(bad_commit)} file có trường commit khác file .ok, ví dụ {bad_commit[:3]}')
     if st.incomplete:
         print(f'  {len(st.incomplete)} file chưa xong (thiếu .ok), ví dụ {st.incomplete[:3]}')
+    waiting = 0
     for g, js in by_g.items():
-        miss = [j['id'] for j in js if j['id'] not in st.d]
-        print(f'  {g:7s} {len(js) - len(miss):5d}/{len(js):<5d} {JB.GROUPS.get(g, "")}')
-        if miss:
-            problem(f'nhóm {g} thiếu {len(miss)} kết quả, ví dụ {miss[:4]}')
+        miss = [j for j in js if j['id'] not in st.d]
+        wait = [j for j in miss if JB.waits_for_prep(j)]
+        hard = [j['id'] for j in miss if not JB.waits_for_prep(j)]
+        waiting += len(wait)
+        extra = f' ({len(wait)} chờ dữ liệu e5/jina)' if wait else ''
+        print(f'  {g:7s} {len(js) - len(miss):5d}/{len(js):<5d} {JB.GROUPS.get(g, "")}{extra}')
+        if hard:
+            problem(f'nhóm {g} thiếu {len(hard)} kết quả, ví dụ {hard[:4]}')
+    SUMMARY['waiting_for_prep'] = waiting
     # cấu hình chung của mô phỏng lý tưởng
     v2 = [d for k, d in st.d.items() if isinstance(d, dict) and 'recall5' in d and 'key_bits' in d]
     nonorm = sum(1 for d in v2 if not d.get('normalize_cols'))
@@ -871,8 +877,12 @@ def changes():
 # ------------------------------------------------------------------ smoke check
 def smoke_check(root):
     jobs = JB.build_smoke()
-    bad = 0
+    bad = skipped = 0
     for j in jobs:
+        if JB.waits_for_prep(j):
+            print(f'  chờ dữ liệu e5/jina {j["id"]}')
+            skipped += 1
+            continue
         p = j['out'].replace('ppna_r1/logs_dot1/smoke/out', root, 1)
         err = []
         try:
@@ -925,7 +935,8 @@ def smoke_check(root):
             print(f'  LỖI {j["id"]}: {"; ".join(err)}')
         else:
             print(f'  đạt {j["id"]}')
-    print(f'SMOKE CHECK: {len(jobs) - bad}/{len(jobs)} đạt')
+    n = len(jobs) - skipped
+    print(f'SMOKE CHECK: {n - bad}/{n} đạt' + (f', {skipped} chờ dữ liệu e5/jina' if skipped else ''))
     return 0 if bad == 0 else 1
 
 
@@ -963,7 +974,8 @@ def main():
         with open(a.summary, 'w', encoding='utf-8') as fh:
             json.dump(SUMMARY, fh, indent=1, ensure_ascii=False, default=str)
     print()
-    print(f'KẾT LUẬN: {len(PROBLEMS)} vấn đề')
+    w = SUMMARY.get('waiting_for_prep', 0)
+    print(f'KẾT LUẬN: {len(PROBLEMS)} vấn đề' + (f'; {w} job chờ dữ liệu e5/jina' if w else ''))
     for p in PROBLEMS:
         print(f'  - {p}')
     return 0

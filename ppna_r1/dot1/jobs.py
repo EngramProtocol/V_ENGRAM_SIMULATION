@@ -33,6 +33,21 @@ WORKLOADS = [('squad', 'squad', 'm512'), ('code_e5', 'code_e5', 'm512'),
 # Bảng 10: (r, chu kỳ sửa phút). 480 = 4 lần median session 120 phút; 1320 = 22 giờ.
 CHURN_CONFIGS = [(1, 0), (1, 480), (4, 1320)]
 
+# File do bước e5 và jina của ppna-r1-prep sinh ra (hai bước nhúng lâu nhất). Job chỉ thiếu
+# các file này được coi là "chờ dữ liệu": smoke test và runner không báo lỗi vì chúng, và
+# lần chạy run_dot1.sh sau khi bước chuẩn bị xong sẽ chạy đúng các job đó.
+DEFERRED_DATA = ('data/code_e5_', 'data/scifact_e5_', 'data/code_jina_')
+
+
+def missing_inputs(job):
+    return [p for p in job['needs'] if not os.path.exists(p)]
+
+
+def waits_for_prep(job, missing=None):
+    m = missing_inputs(job) if missing is None else missing
+    return bool(m) and all(p.startswith(DEFERRED_DATA) for p in m)
+
+
 GROUPS = {
     't4':    'Bảng 4: semantic và bốn control, hai corpus (kèm thống kê từng bảng chiếu)',
     't5':    'Bảng 5: T thuộc {1,3,5,12} với K = 20; K thuộc {10,40,80} với T = 8',
