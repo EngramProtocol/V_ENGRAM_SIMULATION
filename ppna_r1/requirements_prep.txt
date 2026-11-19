@@ -1,0 +1,11 @@
+# Môi trường riêng cho bước chuẩn bị dữ liệu (venv_prep), tách khỏi venv mô phỏng.
+# torch cài trước, bản CPU: pip install torch --index-url https://download.pytorch.org/whl/cpu
+# jina-code-embeddings-0.5b cần torch >= 2.7.1, transformers >= 4.53, sentence-transformers >= 5.0.
+numpy
+pandas
+pyarrow
+huggingface_hub
+datasets
+faiss-cpu
+transformers>=4.53
+sentence-transformers>=5.0

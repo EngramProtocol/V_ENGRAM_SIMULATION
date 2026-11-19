@@ -70,3 +70,8 @@ termabl_*.json
 indep_*.json
 repl_*.json
 fail_*.json
+
+# chuẩn bị dữ liệu đợt 1 (ppna_r1/run_prep.sh)
+venv_prep/
+data/_prep_cache/
+data/_prep_smoke/
