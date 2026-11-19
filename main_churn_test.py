@@ -93,7 +93,11 @@ def metadata_alive(vector, tag, network_nodes):
 
 
 def can_recover_payload(tag, network_nodes):
-    """Payload đặt 1 lần: tái tạo 30 placement key CHỈ từ tag, cần >=20/30 shard sống sót."""
+    """Payload đặt 1 lần: tái tạo 30 placement key CHỈ từ tag, cần >=20/30 shard sống sót.
+
+    Trả về (giải mã được, số shard lookup tìm thấy). Vòng lặp dừng sớm khi đủ 20
+    shard như bản cũ, nên dòng số ngẫu nhiên và kết quả giữ nguyên từng bit.
+    """
     shards_collected = 0
     for s_id in range(SHARDS_PER_FILE):
         if not network_nodes:
@@ -110,10 +114,29 @@ def can_recover_payload(tag, network_nodes):
         if shards_collected >= K_REQUIRED:
             break
 
-    return shards_collected >= K_REQUIRED
+    return shards_collected >= K_REQUIRED, shards_collected
 
 
-def count_recovered_files(network_nodes, doc_ids, vectors):
+def build_holder_index(network_nodes, doc_ids):
+    """ppna-r1 đợt 1: peer nào giữ shard và discovery record của các object được đo.
+
+    Dựng một lần sau ingest, chỉ đọc bộ nhớ của peer, không dùng số ngẫu nhiên.
+    Dùng để tách hai nguyên nhân mất: shard (hay anchor) đã chết cùng peer, và
+    shard còn sống nhưng lookup không tìm thấy.
+    """
+    tags = {f"doc_{d}" for d in doc_ids}
+    shard_holders, meta_holders = {}, {}
+    for node in network_nodes:
+        for lab in node.SSD_Storage:
+            if lab.split("_shard_")[0] in tags:
+                shard_holders.setdefault(lab, []).append(node)
+        for tag in node.RAM_Index:
+            if tag in tags:
+                meta_holders.setdefault(tag, []).append(node)
+    return shard_holders, meta_holders
+
+
+def count_recovered_files(network_nodes, doc_ids, vectors, holders=None):
     """Đo TÁCH BẠCH 3 tầng, vì chúng hỏng vì lý do khác nhau:
       - metadata availability: routing còn tìm được discovery record không (phụ thuộc r)
       - payload decode      : còn >=20/30 shard không (phụ thuộc erasure code)
@@ -121,14 +144,29 @@ def count_recovered_files(network_nodes, doc_ids, vectors):
     Bản cũ gộp tất cả và bỏ qua tầng metadata, nên chỉ đo được erasure code.
     """
     meta_ok = payload_ok = e2e_ok = 0
+    phys = {"meta_phys": 0, "payload_phys": 0, "lookup_miss": 0, "alive_sum": 0,
+            "found_failed_sum": 0, "alive_failed_sum": 0, "n_failed": 0}
+    live = set(network_nodes)
     for doc_id in doc_ids:
         tag = f"doc_{doc_id}"
         m = metadata_alive(vectors[doc_id], tag, network_nodes)
-        p = can_recover_payload(tag, network_nodes)
+        p, found = can_recover_payload(tag, network_nodes)
         meta_ok += m
         payload_ok += p
         e2e_ok += (m and p)
-    return meta_ok, payload_ok, e2e_ok
+        if holders is not None:
+            shard_holders, meta_holders = holders
+            n_alive = sum(1 for s_id in range(SHARDS_PER_FILE)
+                          if any(h in live for h in shard_holders.get(f"{tag}_shard_{s_id}", ())))
+            phys["meta_phys"] += any(h in live for h in meta_holders.get(tag, ()))
+            phys["payload_phys"] += n_alive >= K_REQUIRED
+            phys["lookup_miss"] += (n_alive >= K_REQUIRED) and not p
+            phys["alive_sum"] += n_alive
+            if not p:
+                phys["n_failed"] += 1
+                phys["found_failed_sum"] += found
+                phys["alive_failed_sum"] += n_alive
+    return meta_ok, payload_ok, e2e_ok, phys
 
 
 def run_churn_test(env):
@@ -168,14 +206,24 @@ def run_churn_test(env):
 
     total_nodes = len(network_nodes)
     n = len(doc_ids)
+    holders = build_holder_index(network_nodes, doc_ids)
     rows = []
     for churn_ratio in CHURN_STEPS:
         kill_random_nodes(network_nodes, churn_ratio, total_nodes)
-        meta_ok, payload_ok, e2e_ok = count_recovered_files(network_nodes, doc_ids, vectors)
+        meta_ok, payload_ok, e2e_ok, ph = count_recovered_files(network_nodes, doc_ids, vectors, holders)
         print(f"{churn_ratio:>9.0%} {100*meta_ok/n:>11.1f}% {100*payload_ok/n:>11.1f}% "
-              f"{100*e2e_ok/n:>11.1f}%")
+              f"{100*e2e_ok/n:>11.1f}%   | còn đủ shard {100*ph['payload_phys']/n:5.1f}% "
+              f"| còn anchor {100*ph['meta_phys']/n:5.1f}%")
+        nf = max(ph["n_failed"], 1)
         rows.append({"loss": churn_ratio, "metadata": 100 * meta_ok / n,
-                     "payload": 100 * payload_ok / n, "e2e": 100 * e2e_ok / n})
+                     "payload": 100 * payload_ok / n, "e2e": 100 * e2e_ok / n,
+                     # ppna-r1 đợt 1: tách mất shard với không tìm thấy shard
+                     "metadata_physical": 100 * ph["meta_phys"] / n,
+                     "payload_physical": 100 * ph["payload_phys"] / n,
+                     "payload_lookup_miss": 100 * ph["lookup_miss"] / n,
+                     "mean_alive_shards": ph["alive_sum"] / n,
+                     "mean_found_shards_when_failed": ph["found_failed_sum"] / nf,
+                     "mean_alive_shards_when_failed": ph["alive_failed_sum"] / nf})
 
     if OUT_JSON:
         import json
@@ -188,6 +236,8 @@ def run_churn_test(env):
                        "ingest_sample_only": INGEST_SAMPLE_ONLY,
                        "contacts_mean": float(np.mean(_contacts)),
                        "contacts_min": int(np.min(_contacts)),
+                       "churn_steps": CHURN_STEPS,
+                       "commit": _os.environ.get("RUN_COMMIT", ""),
                        "rows": rows}, fh, indent=2)
         print(f"-> Lưu: {OUT_JSON}")
 

@@ -30,30 +30,26 @@ import os as _os
 # CORPUS=scifact POOL_PER_TABLE=30 python3 baselines.py
 CORPUS = _os.environ.get("CORPUS", "code")
 
+# ppna-r1 đợt 1 (R1-5): bộ dữ liệu bất kỳ trong ./data, biến thể PQ và tập query
+# chọn qua biến môi trường, để Bucket-LSH dùng ĐÚNG PQ của V-Engram (m512) và để
+# chọn độ rộng bucket trên tập validation tách khỏi tập đánh giá.
+#   PQ_VARIANT=m512   dùng {CORPUS}_pq_codebook_m512.npy (mặc định '' = m256 như cũ)
+#   QUERY_SET=val     dùng {CORPUS}_val_query_embeddings.npy và _val_ground_truth.json
+#   BUCKET_ONLY=1     chỉ chạy kiểm brute-force và Bucket-LSH (bỏ HNSW và các baseline khác)
+#   OUT_JSON=f.json   ghi kết quả quét bucket ra JSON
+PQ_VARIANT = _os.environ.get("PQ_VARIANT", "")
+QUERY_SET = _os.environ.get("QUERY_SET", "test")
+BUCKET_ONLY = _os.environ.get("BUCKET_ONLY", "0") == "1"
+OUT_JSON = _os.environ.get("OUT_JSON")
+_PQSFX = f"_{PQ_VARIANT}" if PQ_VARIANT and PQ_VARIANT != "m256" else ""
+_QSFX = "_val" if QUERY_SET == "val" else ""
 PATHS = {
-    "code": {
-        "emb":      "./data/code_corpus_embeddings.npy",
-        "q":        "./data/code_query_embeddings.npy",
-        "gt":       "./data/code_ground_truth.json",
-        "codebook": "./data/code_pq_codebook.npy",
-        "pq_codes": "./data/code_pq_codes.npy",
-    },
-    "scifact": {
-        "emb":      "./data/scifact_corpus_embeddings.npy",
-        "q":        "./data/scifact_query_embeddings.npy",
-        "gt":       "./data/scifact_ground_truth.json",
-        "codebook": "./data/scifact_pq_codebook.npy",
-        "pq_codes": "./data/scifact_pq_codes.npy",
-    },
-    "squad": {
-        "emb":      "./data/squad_corpus_embeddings.npy",
-        "q":        "./data/squad_query_embeddings.npy",
-        "gt":       "./data/squad_ground_truth.json",
-        "codebook": "./data/squad_pq_codebook.npy",
-        "pq_codes": "./data/squad_pq_codes.npy",
-    },
-}[CORPUS]
-
+    "emb":      f"./data/{CORPUS}_corpus_embeddings.npy",
+    "q":        f"./data/{CORPUS}{_QSFX}_query_embeddings.npy",
+    "gt":       f"./data/{CORPUS}{_QSFX}_ground_truth.json",
+    "codebook": f"./data/{CORPUS}_pq_codebook{_PQSFX}.npy",
+    "pq_codes": f"./data/{CORPUS}_pq_codes{_PQSFX}.npy",
+}
 # MODEL_NAME bỏ: query embeddings đọc từ file precomputed
 # PHẢI trùng DEFAULT_LSH_SEED trong src/routing.py để so cùng ma trận chiếu.
 # Đổi được qua env cho MC8: LSH ceiling và bucket-LSH phụ thuộc ma trận chiếu,
@@ -77,7 +73,7 @@ INDEXED_COUNT    = None       # None = index toàn bộ corpus (khớp main_simu
                               # Đặt 16000 nếu run chính thức dùng 80/20 (nhớ GT phải tính
                               # trên đúng tập index thì mới đạt được).
 HNSW_M, HNSW_EF  = 32, 200
-PQ_M, PQ_DSUB    = 256, 4     # 256 subquantizer × 4 chiều = 1024 (khớp node.adc_search)
+PQ_M, PQ_DSUB    = 256, 4     # đặt lại theo shape của codebook sau khi nạp
 REPORT_PATH      = "baseline_report.txt"
 # MC8: baseline hiện chỉ 1 seed. Cho seed đọc từ env để chạy đa seed —
 # nếu hardcode thì 5 lần chạy cho kết quả y hệt.
@@ -171,6 +167,74 @@ def sha160(s):
     return int(hashlib.sha256(s.encode("utf-8")).hexdigest(), 16) & ((1 << 160) - 1)
 
 
+def _bucket_sweep(E, Qv, gt_sets, projs, doc_bits, q_bits, pq_codes, codebook):
+    """Quét bề rộng bucket b. Trả về list (b, Recall@5, Hit@5, pool TB, % query rỗng)."""
+    Q = len(gt_sets)
+    # Margin của từng bit: |projection|. Bit có margin nhỏ nhất nằm sát siêu
+    # phẳng nên dễ lật nhất — ĐÚNG quy tắc V-Engram dùng (np.argsort(np.abs(proj[:c]))).
+    # Dùng chung quy tắc để phép so công bằng: baseline được đúng cơ chế
+    # multi-probe mà V-Engram được hưởng.
+    q_margin = [np.abs(Qv @ projs[t]) for t in range(NUM_PROJECTIONS)]  # (Q,160)
+
+    def _probe_labels(t, q, b, n_probe):
+        """Nhãn bucket gốc + (n_probe-1) nhãn lật một bit yếu nhất."""
+        base = list(q_bits[t][q][:b])
+        labs = [tuple(base)]
+        if n_probe > 1:
+            for i in np.argsort(q_margin[t][q][:b])[:n_probe - 1]:
+                f = base.copy()
+                f[int(i)] = not f[int(i)]
+                labs.append(tuple(f))
+        return labs
+
+    _probe_note = ("tra bucket chính xác" if BUCKET_PROBES <= 1
+                   else f"multi-probe {BUCKET_PROBES} bucket/bảng")
+    log(f"[*] Baseline Bucket-LSH ({_probe_note}, quét b) ...")
+    bucket_rows = []
+    for b in BUCKET_WIDTHS:
+        tables = []
+        for t in range(NUM_PROJECTIONS):
+            d = {}
+            lab = [tuple(row) for row in doc_bits[t][:, :b]]
+            for i, L_ in enumerate(lab):
+                d.setdefault(L_, []).append(i)
+            tables.append(d)
+        ret, pools, empty = [], [], 0
+        for q in range(Q):
+            cand = set()
+            for t in range(NUM_PROJECTIONS):
+                for lab in _probe_labels(t, q, b, BUCKET_PROBES):
+                    cand.update(tables[t].get(lab, ()))
+            pools.append(len(cand))
+            if not cand:
+                empty += 1
+                ret.append([])          # bucket rỗng ở MỌI bảng -> không trả gì
+            else:
+                ret.append(rerank(Qv[q], cand, E, pq_codes, codebook))
+        s_r, s_h, m = success_and_mrr(ret, gt_sets)
+        bucket_rows.append((b, s_r, s_h, float(np.mean(pools)), 100.0 * empty / Q))
+        log(f"    b={b:>2} T={BUCKET_PROBES}: Recall@5={s_r:5.1f}%  Hit@5={s_h:5.1f}%  "
+            f"pool TB={np.mean(pools):7.0f}  query bucket rỗng={100.0*empty/Q:.1f}%")
+    return bucket_rows
+
+
+def _write_json(bucket_rows, N, Q, bf_recall):
+    if not OUT_JSON:
+        return
+    out = {"corpus": CORPUS, "query_set": QUERY_SET, "pq_variant": PQ_VARIANT or "m256",
+           "pq_m": PQ_M, "lsh_seed": LSH_SEED, "rng_seed": RNG_SEED,
+           "bucket_probes": BUCKET_PROBES, "num_tables": NUM_PROJECTIONS,
+           "normalize_cols": bool(routing.NORMALIZE_ROWS), "n_corpus": N, "n_query": Q,
+           "rerank": RERANK, "bruteforce_recall5": bf_recall,
+           "commit": os.environ.get("RUN_COMMIT", ""),
+           "widths": [{"b": int(b), "recall5": float(r), "hit5": float(h),
+                       "pool_mean": float(p), "empty_pct": float(e)}
+                      for b, r, h, p, e in bucket_rows]}
+    with open(OUT_JSON, "w", encoding="utf-8") as fh:
+        json.dump(out, fh, indent=2)
+    log(f"[*] Đã ghi: {OUT_JSON}")
+
+
 def main():
     assert os.path.isdir("src"), "Hãy chạy ở thư mục gốc repo (cần thấy src/)."
     log(f"[*] CORPUS = {CORPUS} | RERANK = {RERANK} | L = {NUM_PROJECTIONS} | POOL/table = {POOL_PER_TABLE}")
@@ -190,8 +254,11 @@ def main():
     log(f"[*] Queries: {Q}")
 
     codebook = np.load(PATHS["codebook"]).astype(np.float32)
-    if codebook.shape != (PQ_M, 256, PQ_DSUB):
-        log(f"[!] Cảnh báo: codebook shape {codebook.shape} ≠ (256,256,4). Kiểm tra lại.")
+    global PQ_M, PQ_DSUB
+    PQ_M, PQ_DSUB = int(codebook.shape[0]), int(codebook.shape[2])
+    if PQ_M * PQ_DSUB != dim:
+        raise SystemExit(f"codebook {codebook.shape} không khớp {dim} chiều")
+    log(f"[*] PQ: m={PQ_M}, d_sub={PQ_DSUB} ({PATHS['codebook']})")
     if os.path.exists(PATHS["pq_codes"]):
         pq_codes = np.load(PATHS["pq_codes"])
         if pq_codes.shape[0] != N:
@@ -224,6 +291,15 @@ def main():
     results = {}
     results["Exact Brute-Force (IndexFlatIP)"] = (bf_r, bf_h, bf_m, "Centralized reference = Ground Truth")
 
+    if BUCKET_ONLY:
+        initialize_lsh_projections(LSH_SEED, vector_dim=dim)
+        projs = routing.PROJECTION_MATRICES
+        doc_bits = [srp_bits(E, projs[t]) for t in range(NUM_PROJECTIONS)]
+        q_bits = [srp_bits(Qv, projs[t]) for t in range(NUM_PROJECTIONS)]
+        bucket_rows = _bucket_sweep(E, Qv, gt_sets, projs, doc_bits, q_bits, pq_codes, codebook)
+        _write_json(bucket_rows, N, Q, bf_r)
+        return
+
     # 4) HNSW
     log("[*] Baseline HNSW ...")
     hnsw = faiss.IndexHNSWFlat(dim, HNSW_M)         # METRIC_L2; với vector chuẩn hoá ~ cosine  # type: ignore[attr-defined]  # faiss thiếu stub
@@ -237,7 +313,7 @@ def main():
     log(f"    Recall@5={s_r:.1f}%  Success@5={s_h:.1f}%  MRR@5={m:.3f}")
 
     # 5) Chuẩn bị SRP keys (trùng V-Engram) + crypto keys
-    initialize_lsh_projections(LSH_SEED)
+    initialize_lsh_projections(LSH_SEED, vector_dim=dim)
     projs = routing.PROJECTION_MATRICES            # list L ma trận (1024,160)
     doc_bits = [srp_bits(E, projs[t]) for t in range(NUM_PROJECTIONS)]   # mỗi cái (N,160) bool
     q_bits   = [srp_bits(Qv, projs[t]) for t in range(NUM_PROJECTIONS)]  # (Q,160) bool
@@ -285,49 +361,7 @@ def main():
                    else f"multi-probe {BUCKET_PROBES} bucket/bảng")
     log(f"[*] Baseline Bucket-LSH ({_probe_note}, quét b) ...")
 
-    # Margin của từng bit: |projection|. Bit có margin nhỏ nhất nằm sát siêu
-    # phẳng nên dễ lật nhất — ĐÚNG quy tắc V-Engram dùng (src/routing.py dòng 96,
-    # np.argsort(np.abs(proj[:c]))). Dùng chung quy tắc để phép so công bằng:
-    # baseline được đúng cơ chế multi-probe mà V-Engram được hưởng.
-    q_margin = [np.abs(Qv @ projs[t]) for t in range(NUM_PROJECTIONS)]  # (Q,160)
-
-    def _probe_labels(t, q, b, n_probe):
-        """Nhãn bucket gốc + (n_probe-1) nhãn lật một bit yếu nhất."""
-        base = list(q_bits[t][q][:b])
-        labs = [tuple(base)]
-        if n_probe > 1:
-            for i in np.argsort(q_margin[t][q][:b])[:n_probe - 1]:
-                f = base.copy()
-                f[int(i)] = not f[int(i)]
-                labs.append(tuple(f))
-        return labs
-
-    bucket_rows = []
-    for b in BUCKET_WIDTHS:
-        # gom doc theo nhãn bucket b-bit, mỗi bảng một từ điển
-        tables = []
-        for t in range(NUM_PROJECTIONS):
-            d = {}
-            lab = [tuple(row) for row in doc_bits[t][:, :b]]
-            for i, L_ in enumerate(lab):
-                d.setdefault(L_, []).append(i)
-            tables.append(d)
-        ret, pools, empty = [], [], 0
-        for q in range(Q):
-            cand = set()
-            for t in range(NUM_PROJECTIONS):
-                for lab in _probe_labels(t, q, b, BUCKET_PROBES):
-                    cand.update(tables[t].get(lab, ()))
-            pools.append(len(cand))
-            if not cand:
-                empty += 1
-                ret.append([])          # bucket rỗng ở MỌI bảng -> không trả gì
-            else:
-                ret.append(rerank(Qv[q], cand, E, pq_codes, codebook))
-        s_r, s_h, m = success_and_mrr(ret, gt_sets)
-        bucket_rows.append((b, s_r, s_h, float(np.mean(pools)), 100.0 * empty / Q))
-        log(f"    b={b:>2} T={BUCKET_PROBES}: Recall@5={s_r:5.1f}%  Hit@5={s_h:5.1f}%  "
-            f"pool TB={np.mean(pools):7.0f}  query bucket rỗng={100.0*empty/Q:.1f}%")
+    bucket_rows = _bucket_sweep(E, Qv, gt_sets, projs, doc_bits, q_bits, pq_codes, codebook)
     # lấy dòng có pool GẦN NHẤT với ngân sách ứng viên của V-Engram để lên bảng chính
     b_best = min(bucket_rows, key=lambda r: abs(r[3] - VENGRAM_CANDIDATES))
     results["Bucket-LSH (exact bucket)"] = (

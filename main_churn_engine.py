@@ -544,7 +544,9 @@ def main():
         f'_ses{int(args.median_session)}_{args.session_dist}'
         f'_rep{int(args.repair_interval)}{args.repair_mode[0] if args.repair_interval>0 else ""}'
         f'_s{args.seed}_nq{n_query}.json')
-    json.dump({'config': vars(args), 'corpus': N_DOCS, 'history': hist},
+    json.dump({'config': vars(args), 'corpus': N_DOCS, 'history': hist,
+               # ppna-r1 đợt 1: commit sinh ra file, để script tổng hợp kiểm phiên bản
+               'commit': os.environ.get('RUN_COMMIT', '')},
               open(out, 'w'), indent=2)
     print(f'\n-> Lưu: {out}')
 

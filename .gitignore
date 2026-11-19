@@ -75,3 +75,9 @@ fail_*.json
 venv_prep/
 data/_prep_cache/
 data/_prep_smoke/
+
+# đợt 1 (ppna_r1/run_dot1.sh)
+ppna_r1/out_dot1/
+ppna_r1/logs_dot1/
+ppna_r1/dot1_report.txt
+ppna_r1/dot1_summary.json

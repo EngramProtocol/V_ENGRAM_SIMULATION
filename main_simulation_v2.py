@@ -36,6 +36,7 @@ _PT_STATS = {}
 from typing import Optional
 
 from src.routing import initialize_lsh_projections, generate_multi_semantic_keys
+import src.routing as _routing
 
 
 # ------------------------------------------------------------------ #
@@ -43,6 +44,18 @@ from src.routing import initialize_lsh_projections, generate_multi_semantic_keys
 # Nhanh hơn nhiều -> sweep được nhiều cấu hình. Latency đo riêng sau.
 # ------------------------------------------------------------------ #
 class FastNetwork:
+    # ppna-r1 đợt 1 (R1-5, R1-7): số bit đầu của sketch giữ làm target. 63 = sketch
+    # đầy đủ như bài; nhỏ hơn thì phần còn lại đặt bằng 0 (khoá cụt kiểu bucket ID
+    # nhưng vẫn lấy K peer XOR-gần nhất quanh target).
+    KEY_BITS = 63
+
+    @classmethod
+    def _mask(cls, key):
+        b = cls.KEY_BITS
+        if b >= 63:
+            return key
+        return key & (((1 << b) - 1) << (63 - b))
+
     def __init__(self, num_nodes, seed):
         rnd = random.Random(seed)
         # 63-bit thay vì 160-bit: đủ để phân biệt 10k node, cho phép vector hoá numpy
@@ -57,7 +70,7 @@ class FastNetwork:
     @staticmethod
     def key63(vector, proj):
         bits = (np.asarray(vector).flatten() @ proj > 0).astype(int)[:63]
-        return np.int64(int(''.join(map(str, bits)), 2))
+        return np.int64(FastNetwork._mask(int(''.join(map(str, bits)), 2)))
 
     def knn(self, key, k):
         # Nếu đã tắt node (mục 16), chỉ tìm trong tập còn sống: client không thể
@@ -86,11 +99,11 @@ class FastNetwork:
         """
         pr = np.asarray(vector).flatten() @ proj
         bits = (pr > 0).astype(int)[:63]
-        base = int(''.join(map(str, bits)), 2)
+        base = FastNetwork._mask(int(''.join(map(str, bits)), 2))
         keys = [np.int64(base)]
         if T <= 1:
             return keys
-        c = min(c, 63)
+        c = min(c, 63, FastNetwork.KEY_BITS)
         weak = np.argsort(np.abs(pr[:c]))          # bit yếu nhất trước
         for j in weak[:T - 1]:
             keys.append(np.int64(base ^ (1 << (62 - int(j)))))
@@ -182,39 +195,46 @@ def main():
                     help='BASELINE: chạm cùng số node nhưng chọn NGẪU NHIÊN '
                          '(không dùng semantic key). So với bản thường để biết '
                          'routing có đóng góp gì không.')
+    ap.add_argument('--query-set', default='test', choices=['test', 'val'],
+                    help="ppna-r1: 'val' đọc {ds}_val_query_embeddings.npy và "
+                         "{ds}_val_ground_truth.json (tập validation tách khỏi tập đánh giá)")
+    ap.add_argument('--key-bits', type=int, default=63, metavar='B',
+                    help='ppna-r1: chỉ giữ B bit đầu của sketch làm target (63 = đầy đủ)')
+    ap.add_argument('--proj-family', default=None, choices=['achlioptas', 'gaussian'],
+                    help='ppna-r1: họ phép chiếu (mặc định theo PROJ_FAMILY, achlioptas)')
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
+    if not 1 <= args.key_bits <= 63:
+        raise SystemExit('--key-bits phải trong khoảng 1..63')
+    FastNetwork.KEY_BITS = args.key_bits
 
     D = f'./data/{args.dataset}'
     print(f"[*] Nạp data: {args.dataset} | PQ={'BẬT' if args.use_pq else 'TẮT (oracle cosine)'}")
     E  = np.load(f'{D}_corpus_embeddings.npy')      # (N,1024) đã normalize
-    Qv = np.load(f'{D}_query_embeddings.npy')       # (500,1024) đã normalize
+    _qs = '_val' if args.query_set == 'val' else ''
+    Qv = np.load(f'{D}{_qs}_query_embeddings.npy')  # (500,1024) đã normalize
     _sfx = f'_{args.pq_variant}' if args.pq_variant else ''
     codes = np.load(f'{D}_pq_codes{_sfx}.npy')          # (N, m) uint8
     codebook = np.load(f'{D}_pq_codebook{_sfx}.npy')    # (m, 256, d_sub)
-    gt = json.load(open(f'{D}_ground_truth.json', encoding='utf-8'))
+    gt = json.load(open(f'{D}{_qs}_ground_truth.json', encoding='utf-8'))
     N_DOCS = len(E)
     print(f"    corpus={N_DOCS:,} | query={len(gt)} | codebook={codebook.shape} "
           f"({codebook.shape[0]} byte/doc)")
 
-    # LSH projections — dùng đúng hàm của repo để không lệch với code gốc
-    initialize_lsh_projections(args.seed)
-    from src.routing import PROJECTION_MATRICES as _P
-    if args.num_tables is None:
-        P = _P
-    elif args.num_tables <= len(_P) and args.table_pool <= args.num_tables:
-        P = _P[:args.num_tables]
+    # LSH projections — dùng đúng hàm của repo để không lệch với code gốc.
+    # ppna-r1 đợt 1: mọi L (kể cả L > 5 và pool over-draw) sinh bằng cùng một hàm,
+    # cùng dòng số, cùng chuẩn hoá cột, đúng số chiều của embedding. Bản trước sinh
+    # L > 5 ở nhánh riêng không chuẩn hoá.
+    _L_req = args.num_tables if args.num_tables is not None else _routing.NUM_PROJECTIONS
+    n_draw = max(_L_req, args.table_pool)
+    initialize_lsh_projections(args.seed, vector_dim=E.shape[1], num_projections=n_draw,
+                               family=args.proj_family)
+    from src.routing import PROJECTION_MATRICES as _pool
+    args.num_tables = _L_req
+    if n_draw <= _L_req:
+        P = list(_pool[:_L_req])
     else:
-        # Nhánh này giờ cũng chạy khi BẬT over-draw ở L nhỏ: cần rút thêm ma
-        # trận ngoài PROJECTION_MATRICES sẵn có để có pool mà chọn.
-        # (bản trước chỉ vào đây khi L > len(_P), nên --table-pool bị bỏ qua
-        #  im lặng ở cấu hình chốt L=5 — đúng loại lỗi khó thấy nhất.)
-        # cần nhiều bảng hơn mặc định -> sinh lại bằng cùng seed, cùng phân phối Achlioptas
-        rng = np.random.RandomState(args.seed)
-        n_draw = max(args.num_tables, args.table_pool)
-        _pool = [rng.choice([0, 1, -1], size=(E.shape[1], 160), p=[2/3, 1/6, 1/6])
-                 for _ in range(n_draw)]
-        if n_draw > args.num_tables:
+        if n_draw > _L_req:
             # OVER-DRAW AND SELECT: rút nhiều ma trận hơn cần, giữ những cái có
             # tỉ lệ trùng prefix cao nhất trên một tập query HIỆU CHUẨN TÁCH RIÊNG.
             #
@@ -268,8 +288,6 @@ def main():
                   " ".join(f"{100*x:.1f}" for x in sorted(scores, reverse=True)))
             print(f"    giữ lại      : " +
                   " ".join(f"{100*scores[i]:.1f}" for i in keep))
-        else:
-            P = _pool[:args.num_tables]
     L = len(P)
     print(f"[*] L={L} bảng chiếu, seed={args.seed}")
 
@@ -487,6 +505,16 @@ def main():
         'num_tables': L,
         'local_topk': args.local_topk, 'table_pool': args.table_pool, 'use_pq': args.use_pq,
         'pq_variant': args.pq_variant or 'm256',
+        # ppna-r1 đợt 1: đủ thông tin để script tổng hợp không phải đoán từ tên file
+        'probe_bits': args.probe_bits,
+        'key_bits': args.key_bits,
+        'query_set': args.query_set,
+        'proj_family': args.proj_family or _routing.PROJ_FAMILY,
+        'normalize_cols': bool(_routing.NORMALIZE_ROWS),
+        'zero_columns_redrawn': int(_routing.ZERO_COLUMNS_REDRAWN),
+        'n_docs': int(N_DOCS),
+        'dim': int(E.shape[1]),
+        'commit': __import__('os').environ.get('RUN_COMMIT', ''),
         'n_query': n_run,
         'reachable_hit5': 100 * reach_hit / n_run,
         'returned_hit5':  100 * ret_hit / n_run,
@@ -567,6 +595,13 @@ def main():
         p_bar = float(p_each.mean())
         obs_or = float((H.max(axis=1) > 0).mean())
         pred_or = 1.0 - (1.0 - p_bar) ** H.shape[1]
+        # tương quan từng cặp bảng (tính trước để ghi cả vào JSON)
+        cs = []
+        for a in range(H.shape[1]):
+            for b in range(a + 1, H.shape[1]):
+                sa, sb = H[:, a].std(), H[:, b].std()
+                if sa > 0 and sb > 0:
+                    cs.append(float(np.corrcoef(H[:, a], H[:, b])[0, 1]))
         # Xuất ra JSON để gộp qua nhiều seed. Bản trước chỉ in ra màn hình nên
         # chẩn đoán độc lập chỉ dựa trên hai lần rút ma trận.
         # res đã dựng ở trên nên phải update TRỰC TIẾP vào nó, không qua biến
@@ -577,6 +612,9 @@ def main():
             'or_observed': obs_or,
             'or_if_independent': pred_or,
             'or_shortfall': float(pred_or - obs_or),
+            # ppna-r1 đợt 1: tương quan cặp bảng, để gộp qua 10 seed
+            'table_pair_corr_mean': float(np.mean(cs)) if cs else float('nan'),
+            'table_pair_corr_n': len(cs),
         })
         print()
         print("  === MỤC 2: CÁC BẢNG CÓ ĐỘC LẬP KHÔNG? ===")
@@ -587,13 +625,6 @@ def main():
         print(f"  OR của {H.shape[1]} bảng — ĐO ĐƯỢC : {100*obs_or:.1f}%")
         print(f"  OR nếu ĐỘC LẬP 1-(1-p)^L         : {100*pred_or:.1f}%")
         print(f"  => thiếu hụt {100*(pred_or-obs_or):+.1f} điểm")
-        # tương quan từng cặp
-        cs = []
-        for a in range(H.shape[1]):
-            for b in range(a + 1, H.shape[1]):
-                sa, sb = H[:, a].std(), H[:, b].std()
-                if sa > 0 and sb > 0:
-                    cs.append(float(np.corrcoef(H[:, a], H[:, b])[0, 1]))
         if cs:
             print(f"  Tương quan cặp bảng: TB={np.mean(cs):+.3f} "
                   f"min={min(cs):+.3f} max={max(cs):+.3f}")

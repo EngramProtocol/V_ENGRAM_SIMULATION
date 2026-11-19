@@ -138,16 +138,48 @@ DEFAULT_PROBE_BITS = 16  # c — số bit đầu được phép lật khi probe
 # Khai báo rỗng, KHÔNG sinh ma trận ngay lúc import file
 PROJECTION_MATRICES = []
 
-def generate_lsh_projections(seed, vector_dim=VECTOR_DIM, num_projections=None):
+# ppna-r1 đợt 1 (R1-1, R1-6):
+# PROJ_FAMILY: "achlioptas" (mặc định, như bài) hoặc "gaussian" (SRP đẳng hướng),
+#   cả hai cùng chuẩn hoá cột. Gaussian dùng dòng số riêng của chính nó.
+# Mọi số bảng L đều sinh từ CÙNG một dòng số ngẫu nhiên, nên L bảng đầu của cấu
+# hình L lớn trùng đúng L bảng của cấu hình nhỏ hơn. Với L <= 5 ma trận giữ
+# nguyên từng bit như trước.
+# Cột Achlioptas toàn 0 (xác suất (2/3)^d mỗi cột) được sinh lại như Mục 3.1
+# viết, bằng dòng số riêng của cột đó, nên dòng số chính không đổi khi trường
+# hợp này không xảy ra.
+PROJ_FAMILY = _os.environ.get("PROJ_FAMILY", "achlioptas")
+ZERO_COLUMNS_REDRAWN = 0
+
+
+def _redraw_zero_columns(matrix, seed, table_idx):
+    zero = np.flatnonzero(~matrix.any(axis=0))
+    for j in zero:
+        rs = np.random.RandomState((int(seed) * 1000003 + table_idx * 1009 + int(j)) % (2 ** 32))
+        col = np.zeros(matrix.shape[0], dtype=np.float32)
+        while not col.any():
+            col = rs.choice([0, 1, -1], size=matrix.shape[0], p=[2/3, 1/6, 1/6]).astype(np.float32)
+        matrix[:, j] = col
+    return len(zero)
+
+
+def generate_lsh_projections(seed, vector_dim=VECTOR_DIM, num_projections=None, family=None):
     """Sinh ma trận chiếu bằng Local Random Generator, miễn nhiễm với bên ngoài"""
+    global ZERO_COLUMNS_REDRAWN
     if num_projections is None:
         num_projections = NUM_PROJECTIONS
+    family = family or PROJ_FAMILY
+    if family not in ("achlioptas", "gaussian"):
+        raise SystemExit(f"PROJ_FAMILY phải là achlioptas hoặc gaussian, nhận '{family}'")
     rng = np.random.RandomState(seed)
     projections = []
-    for _ in range(num_projections):
-        # Achlioptas Distribution: P(1)=1/6, P(-1)=1/6, P(0)=2/3
-        matrix = rng.choice([0, 1, -1], size=(vector_dim, 160),
-                            p=[2/3, 1/6, 1/6]).astype(np.float32)
+    for t in range(num_projections):
+        if family == "gaussian":
+            matrix = rng.standard_normal((vector_dim, 160)).astype(np.float32)
+        else:
+            # Achlioptas Distribution: P(1)=1/6, P(-1)=1/6, P(0)=2/3
+            matrix = rng.choice([0, 1, -1], size=(vector_dim, 160),
+                                p=[2/3, 1/6, 1/6]).astype(np.float32)
+            ZERO_COLUMNS_REDRAWN += _redraw_zero_columns(matrix, seed, t)
         if NORMALIZE_ROWS:
             # L2-normalize TỪNG CỘT (mỗi cột là một hyperplane, một bit sketch).
             # Không normalize thì |projection| của hai bit có số nonzero khác
@@ -159,10 +191,11 @@ def generate_lsh_projections(seed, vector_dim=VECTOR_DIM, num_projections=None):
         projections.append(matrix)
     return projections
 
-def initialize_lsh_projections(seed=DEFAULT_LSH_SEED):
+def initialize_lsh_projections(seed=DEFAULT_LSH_SEED, vector_dim=VECTOR_DIM,
+                               num_projections=None, family=None):
     """Hàm này sẽ được gọi ở main.py mỗi khi bắt đầu một Seed mới"""
     global PROJECTION_MATRICES
-    PROJECTION_MATRICES = generate_lsh_projections(seed)
+    PROJECTION_MATRICES = generate_lsh_projections(seed, vector_dim, num_projections, family)
 
 def generate_multi_semantic_keys(vector):
     """
