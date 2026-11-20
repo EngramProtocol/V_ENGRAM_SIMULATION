@@ -2,9 +2,11 @@ import random
 from typing import Any, Dict, List
 import time
 import numpy as np
-from src.node import VEngramNode
+from src.node import VEngramNode, adc_lut
 from src.routing import (
     MEASURE_OVERLAP,
+    bucket_dht_key,
+    bucket_probe_specs,
     generate_multi_semantic_keys,
     generate_probe_keys,
     generate_placement_key,
@@ -207,17 +209,35 @@ def data_ingestion_process(
     pq_codes_path="./data/code_pq_codes.npy",
     data_label="CODE",
     doc_ids=None,
+    placement="lookup",
+    oracle=None,
+    bucket=None,
+    vectors=None,
+    pq_codes=None,
 ):
     """doc_ids=None ingest mọi object 0..num_files-1 như cũ. Truyền một danh sách
-    chỉ số thì chỉ ingest các object đó (main_churn_test dùng khi chỉ cần đo mẫu)."""
+    chỉ số thì chỉ ingest các object đó (main_churn_test dùng khi chỉ cần đo mẫu).
+
+    ppna-r1 đợt 2 (mặc định giữ hành vi cũ):
+      placement="lookup"  record đặt tại anchor do lookup Ripple Search tìm được
+      placement="oracle"  record đặt tại r peer XOR-gần nhất thật (oracle: XorIndex)
+      placement="bucket"  Bucket-LSH: khoá là băm của b bit đầu sketch (bucket: {'b': b}),
+                          record lưu dưới nhãn bucket
+      vectors, pq_codes   mảng đã nạp sẵn (khỏi đọc lại file khi ingest nhiều lần)
+    Mọi chế độ rút số ngẫu nhiên y hệt nhau (một bootstrap mỗi khoá, một RTT mỗi
+    object), nên trạng thái bộ sinh số ngẫu nhiên sau ingest không đổi theo chế độ."""
+    if placement not in ("lookup", "oracle", "bucket"):
+        raise ValueError(f"placement phải là lookup, oracle hoặc bucket, nhận '{placement}'")
     print("\n" + "=" * 60)
     print(
         f"GIAI ĐOẠN 2: PHÂN BỔ DỮ LIỆU {data_label} (TWO-TIER: METADATA L-replica + PAYLOAD-ONCE)"
     )
     print("=" * 60)
 
-    vectors = np.load(embeddings_path)
-    pq_codes = np.load(pq_codes_path)
+    if vectors is None:
+        vectors = np.load(embeddings_path)
+    if pq_codes is None:
+        pq_codes = np.load(pq_codes_path)
     total_shards = 0       # tong so payload shard da dat (ky vong = num_files * shards_per_file)
     total_anchors = 0      # tong so ban sao metadata (ky vong ~ num_files * L * METADATA_ANCHORS)
 
@@ -236,16 +256,28 @@ def data_ingestion_process(
         # TẦNG 1 — METADATA: neo PQ code tại L semantic key (nhân L lần)
         # Day la be mat discovery: query dinh tuyen toi vung ngu nghia se thay PQ code.
         # ============================================================
-        for s_key in s_keys:
+        if placement == "bucket":
+            _b = int(bucket["b"])
+            _specs = [((t, sk >> (160 - _b)), bucket_dht_key(t, _b, sk >> (160 - _b)))
+                      for t, sk in enumerate(s_keys)]
+        else:
+            _specs = [(None, sk) for sk in s_keys]
+        for _bid, s_key in _specs:
             bootstrap_node = random.choice(network_nodes)
-            anchors, _, _ = iterative_find_k_closest_nodes(
-                s_key, bootstrap_node, alpha=DEFAULT_ALPHA, k=METADATA_ANCHORS,
-                phase="ingest"
-            )
+            if placement == "oracle":
+                anchors = oracle.closest(s_key, METADATA_ANCHORS)
+            else:
+                anchors, _, _ = iterative_find_k_closest_nodes(
+                    s_key, bootstrap_node, alpha=DEFAULT_ALPHA, k=METADATA_ANCHORS,
+                    phase="ingest"
+                )
             if DIAG_BUILD:
                 INGEST_LOG.append((s_key, [a.node_id for a in anchors[:METADATA_ANCHORS]]))
             for anchor in anchors[:METADATA_ANCHORS]:
-                anchor.store_metadata(tag, pq_code)
+                if _bid is None:
+                    anchor.store_metadata(tag, pq_code)
+                else:
+                    anchor.store_bucket(_bid, tag, pq_code)
                 total_anchors += 1
 
         # ============================================================
@@ -341,28 +373,53 @@ def _fetch_one_object(env, tag, network_nodes, acc: Dict[str, Any], k_required=2
         yield env.all_of(procs)
 
 
-def _adc_seq(env, nodes, query_vector, codebook, acc):
+def _adc_seq(env, nodes, query_vector, codebook, acc, lut=None):
     """Bản TUẦN TỰ, giữ để đối chiếu. Đặt PARALLEL_ADC=0 để dùng."""
     for node in nodes:
         yield env.timeout(_rtt())
         acc["rpcs"] += 1
         acc["bytes"] += 512 + LOCAL_TOP_K * 24
         acc["cands"].extend(node.adc_search(query_vector, codebook,
-                                            top_k=LOCAL_TOP_K))
+                                            top_k=LOCAL_TOP_K, lut=lut))
 
 
-def _adc_all(env, nodes, query_vector, codebook, acc):
-    """Gọi ADC trên tập node, song song hoặc tuần tự tuỳ PARALLEL_ADC."""
+def _adc_all(env, nodes, query_vector, codebook, acc, lut=None):
+    """Gọi ADC trên tập node, song song hoặc tuần tự tuỳ PARALLEL_ADC.
+    lut: bảng tra ADC của query (adc_lut), tính một lần cho mọi peer."""
     if not nodes:
         return
     if PARALLEL_ADC:
-        yield env.all_of([env.process(_adc_one(env, nd, query_vector, codebook, acc))
+        yield env.all_of([env.process(_adc_one(env, nd, query_vector, codebook, acc, lut))
                           for nd in nodes])
     else:
-        yield env.process(_adc_seq(env, nodes, query_vector, codebook, acc))
+        yield env.process(_adc_seq(env, nodes, query_vector, codebook, acc, lut))
 
 
-def _adc_one(env, node, query_vector, codebook, acc):
+def _bucket_one(env, node, bid, lut, acc):
+    """Bucket-LSH: hỏi MỘT peer mọi record nó giữ dưới nhãn bucket bid, rồi tính
+    khoảng cách ADC cho từng record. Không lọc top-kappa: như Bucket-LSH trên mô
+    hình lý tưởng (baselines.py), mọi record trong bucket đều là ứng viên."""
+    yield env.timeout(_rtt())
+    acc["rpcs"] += 1
+    recs = node.BUCKETS.get(bid)
+    if not recs:
+        acc["bytes"] += 64
+        return
+    m = lut.shape[0]
+    rows = np.arange(m)
+    acc["found"] += 1
+    acc["bytes"] += 64 + len(recs) * (m + 8)
+    for tag, code in recs.items():
+        acc["cands"].append((tag, np.sum(lut[rows, code])))
+
+
+def _bucket_all(env, nodes, bid, lut, acc):
+    if not nodes:
+        return
+    yield env.all_of([env.process(_bucket_one(env, nd, bid, lut, acc)) for nd in nodes])
+
+
+def _adc_one(env, node, query_vector, codebook, acc, lut=None):
     """Gọi ADC trên MỘT node. Viết thành generator để các node chạy SONG SONG.
 
     VÌ SAO CẦN: bản trước duyệt tuần tự và yield env.timeout(_rtt()) từng node.
@@ -376,12 +433,14 @@ def _adc_one(env, node, query_vector, codebook, acc):
     yield env.timeout(_rtt())
     acc["rpcs"] += 1
     acc["bytes"] += 512 + LOCAL_TOP_K * 24
-    acc["cands"].extend(node.adc_search(query_vector, codebook, top_k=LOCAL_TOP_K))
+    acc["cands"].extend(node.adc_search(query_vector, codebook, top_k=LOCAL_TOP_K, lut=lut))
 
 
 def query_pipeline_process(env, network_nodes, query_vector, codebook, target_k=5,
                            k_query=None, multi_probe=None, random_routing=False,
-                           verbose=True):
+                           verbose=True, probe_bits=None, mode=None, match=None,
+                           live_nodes=None, oracle=None, bucket=None, probe_hook=None,
+                           collect=None):
     """Đường đọc: Ripple Search đa bảng + multi-probe -> ADC -> merge -> fetch payload.
 
     Sửa so với bản cũ:
@@ -392,11 +451,32 @@ def query_pipeline_process(env, network_nodes, query_vector, codebook, target_k=
       3. Đếm TÁCH BẠCH rounds / RPC / contacted nodes (mục 3.9).
       4. random_routing=True: baseline chạm CÙNG số node nhưng chọn ngẫu nhiên,
          bỏ qua semantic key — phép so duy nhất trả lời "semantic key có đáng không".
+
+    ppna-r1 đợt 2. Tham số mới, mặc định giữ đúng hành vi cũ:
+      probe_bits  c của truy vấn (mặc định DEFAULT_PROBE_BITS)
+      mode        chế độ định tuyến, ghi đè ROUTING_MODE và random_routing. Thêm ba chế độ:
+                    'oracle'           mỗi probe lấy đúng K peer XOR-gần nhất thật, không định tuyến
+                    'random_equalcand' bốc peer ngẫu nhiên tới khi đủ số record mà semantic
+                                       chạm được ở chính query đó (match['cand_budget'])
+                    'bucket_lsh'       mỗi probe là một lookup Ripple Search tới khoá bucket
+                                       (bucket={'b': b}); peer trả mọi record đúng bucket
+      match       {'n_touch': n}: random_unique khớp số peer của chính query đó
+      live_nodes  danh sách peer còn sống khi mất peer (None = mọi peer)
+      oracle      XorIndex trên các peer còn sống, cho mode 'oracle'
+      probe_hook  hàm(p_key, nodes, hops, rpcs, k) gọi sau mỗi lookup của truy vấn; trả về
+                  thứ hạng XOR của các peer (thay phép sắp xếp toàn mạng của MEASURE_OVERLAP)
+      collect     dict nhận tập ID peer đã đánh giá ('contacted')
+    Bảng tra ADC tính một lần cho query (adc_lut) thay vì mỗi peer một lần; kết quả
+    không đổi.
     """
     if k_query is None:
         k_query = K_QUERY
     if multi_probe is None:
         multi_probe = MULTI_PROBE
+    if probe_bits is None:
+        probe_bits = DEFAULT_PROBE_BITS
+    pool_nodes = network_nodes if live_nodes is None else live_nodes
+    lut = adc_lut(query_vector, codebook)
 
     if verbose:
         print("\n" + "=" * 60)
@@ -416,27 +496,51 @@ def query_pipeline_process(env, network_nodes, query_vector, codebook, target_k=
     shard_misses = 0                          # MC10: shard không tìm thấy
     t_query_start = env.now
 
-    _mode = ROUTING_MODE if ROUTING_MODE != 'auto' else (
-        'random_slots' if random_routing else 'semantic')
+    if mode is not None:
+        _mode = mode
+    else:
+        _mode = ROUTING_MODE if ROUTING_MODE != 'auto' else (
+            'random_slots' if random_routing else 'semantic')
+    if _mode not in ('semantic', 'random_slots', 'random_unique', 'random_equalcand',
+                     'keyed_lookup', 'oracle', 'bucket_lsh'):
+        raise ValueError(f"chế độ định tuyến không hợp lệ: {_mode}")
 
-    if _mode in ('random_slots', 'random_unique'):
+    if _mode in ('random_slots', 'random_unique', 'random_equalcand'):
         # BASELINE ORACLE: bốc node trực tiếp, KHÔNG định tuyến. Không có lookup
         # nào, nên chi phí RPC đúng bằng số lần gọi ADC.
         #
         # Bản trước KHÔNG đếm disc_rpcs ở nhánh này, nên đo ra 0 RPC và làm
         # phép so per-RPC vô nghĩa. Đây là chỗ khiến bài phải SUY RA thay vì đo.
-        if _mode == 'random_unique':
-            # khớp đúng số node PHÂN BIỆT mà semantic chạm: cần biết trước, nên
-            # lấy từ env (do lần chạy semantic cùng cấu hình cung cấp)
-            n_touch = int(_os.environ.get('MATCH_UNIQUE_NODES', k_query * NUM_PROJECTIONS))
+        if _mode == 'random_equalcand':
+            # ppna-r1 đợt 2: như random_equalcand của mô hình lý tưởng. Bốc peer
+            # ngẫu nhiên tới khi các peer đã bốc giữ đủ số record mà semantic chạm
+            # được ở chính query này.
+            budget = int(match['cand_budget'])
+            _order = list(pool_nodes)
+            random.shuffle(_order)
+            _sel, _got = [], set()
+            for nd in _order:
+                if len(_got) >= budget:
+                    break
+                _sel.append(nd)
+                _got.update(nd.RAM_Index.keys())
         else:
-            n_touch = k_query * NUM_PROJECTIONS * multi_probe
-        n_touch = min(n_touch, len(network_nodes))
-        _sel = random.sample(network_nodes, n_touch)
+            if _mode == 'random_unique':
+                # khớp đúng số node PHÂN BIỆT mà semantic chạm: cần biết trước, nên
+                # lấy từ env (do lần chạy semantic cùng cấu hình cung cấp), hoặc từ
+                # match['n_touch'] của chính query này (ppna-r1 đợt 2)
+                if match and 'n_touch' in match:
+                    n_touch = int(match['n_touch'])
+                else:
+                    n_touch = int(_os.environ.get('MATCH_UNIQUE_NODES', k_query * NUM_PROJECTIONS))
+            else:
+                n_touch = k_query * NUM_PROJECTIONS * multi_probe
+            n_touch = min(n_touch, len(pool_nodes))
+            _sel = random.sample(pool_nodes, n_touch)
         for node in _sel:
             contacted.add(node.node_id)
         _acc = {"rpcs": 0, "bytes": 0, "cands": []}
-        yield env.process(_adc_all(env, _sel, query_vector, codebook, _acc))
+        yield env.process(_adc_all(env, _sel, query_vector, codebook, _acc, lut))
         total_rpcs += _acc["rpcs"]; disc_rpcs += _acc["rpcs"]
         disc_bytes += _acc["bytes"]; all_candidates.extend(_acc["cands"])
 
@@ -445,10 +549,10 @@ def query_pipeline_process(env, network_nodes, query_vector, codebook, target_k=
         # Kademlia lặp như semantic. Không cần global membership view, và trả
         # ĐÚNG chi phí routing — đây là baseline mà mục 4.12 phải suy ra chi phí,
         # giờ đo trực tiếp.
-        _borigin = random.choice(network_nodes)
+        _borigin = random.choice(pool_nodes)
         for _ in range(NUM_PROJECTIONS * multi_probe):
             r_key = random.getrandbits(160)
-            bootstrap_node = _borigin if SHARED_ORIGIN else random.choice(network_nodes)
+            bootstrap_node = _borigin if SHARED_ORIGIN else random.choice(pool_nodes)
             nodes, hops, rpcs = iterative_find_k_closest_nodes(
                 r_key, bootstrap_node, alpha=DEFAULT_ALPHA,
                 k=k_query, max_rounds=DEFAULT_R_MAX, phase="query"
@@ -464,7 +568,7 @@ def query_pipeline_process(env, network_nodes, query_vector, codebook, target_k=
                 contacted.add(nd.node_id)
             if _new:
                 _acc = {"rpcs": 0, "bytes": 0, "cands": []}
-                yield env.process(_adc_all(env, _new, query_vector, codebook, _acc))
+                yield env.process(_adc_all(env, _new, query_vector, codebook, _acc, lut))
                 total_rpcs += _acc["rpcs"]; disc_rpcs += _acc["rpcs"]
                 disc_bytes += _acc["bytes"]; all_candidates.extend(_acc["cands"])
     else:
@@ -480,23 +584,33 @@ def query_pipeline_process(env, network_nodes, query_vector, codebook, target_k=
         # Giờ mỗi probe là một tiến trình riêng: tiêu hops x RTT cho định tuyến
         # rồi một RTT cho ADC. Đường tới hạn = probe CHẬM NHẤT.
         # ==================================================================
-        _specs = [pk for t in range(NUM_PROJECTIONS)
-                  for pk in generate_probe_keys(query_vector, t, T=multi_probe,
-                                                c=DEFAULT_PROBE_BITS)]
+        if _mode == 'bucket_lsh':
+            # ppna-r1 đợt 2: (khoá bucket, (bảng, nhãn)) cho L*T probe, cùng lịch
+            # lật bit theo margin như baselines.py
+            _specs = bucket_probe_specs(query_vector, multi_probe, int(bucket["b"]))
+        else:
+            _specs = [(pk, None) for t in range(NUM_PROJECTIONS)
+                      for pk in generate_probe_keys(query_vector, t, T=multi_probe,
+                                                    c=probe_bits)]
         _pa = {"hops": 0, "rpcs": 0, "bytes": 0, "at_cap": 0,
                "cands": [], "peersets": [], "xor_ranks": []}
+        _asked = set()          # bucket_lsh: các cặp (peer, bucket) đã hỏi
 
         # MỘT origin peer cho CẢ query, không phải mỗi probe một origin.
         # Bản trước lấy random.choice trong _one_probe, tức 40 lần khởi động
         # độc lập chứ không phải một client phát 40 probe — mục 2.2 của thầy.
-        _origin = random.choice(network_nodes)
+        _origin = random.choice(pool_nodes)
 
-        def _one_probe(env, p_key, acc):
-            bootstrap_node = _origin if SHARED_ORIGIN else random.choice(network_nodes)
-            nodes, hops, rpcs = iterative_find_k_closest_nodes(
-                p_key, bootstrap_node, alpha=DEFAULT_ALPHA,
-                k=k_query, max_rounds=DEFAULT_R_MAX, phase="query"
-            )
+        def _one_probe(env, p_key, bid, acc):
+            bootstrap_node = _origin if SHARED_ORIGIN else random.choice(pool_nodes)
+            if _mode == 'oracle':
+                # ppna-r1 đợt 2: công tắc truy vấn oracle, đúng K peer gần nhất thật
+                nodes, hops, rpcs = oracle.closest(p_key, k_query), 0, 0
+            else:
+                nodes, hops, rpcs = iterative_find_k_closest_nodes(
+                    p_key, bootstrap_node, alpha=DEFAULT_ALPHA,
+                    k=k_query, max_rounds=DEFAULT_R_MAX, phase="query"
+                )
             for _ in range(hops):          # mỗi vòng định tuyến một RTT
                 yield env.timeout(_rtt())
             acc["hops"] += hops; acc["rpcs"] += rpcs
@@ -505,22 +619,40 @@ def query_pipeline_process(env, network_nodes, query_vector, codebook, target_k=
             if hops >= DEFAULT_R_MAX:
                 acc["at_cap"] += 1
             acc["peersets"].append({nd.node_id for nd in nodes})
-            if MEASURE_OVERLAP:
+            if probe_hook is not None:
+                _rk = probe_hook(p_key, nodes, hops, rpcs, k_query)
+                if _rk:
+                    acc["xor_ranks"].extend(_rk)
+            elif MEASURE_OVERLAP:
                 _tr = sorted(network_nodes, key=lambda nd: nd.node_id ^ p_key)
                 _pos = {nd.node_id: i for i, nd in enumerate(_tr)}
                 acc["xor_ranks"].extend(_pos[nd.node_id] for nd in nodes)
+            if bid is not None:
+                # Bucket-LSH: hỏi mỗi peer trả về đúng bucket này (một lần cho mỗi cặp)
+                _new = [nd for nd in nodes if (nd.node_id, bid) not in _asked]
+                for nd in _new:
+                    _asked.add((nd.node_id, bid))
+                    contacted.add(nd.node_id)
+                if _new:
+                    _a2 = {"rpcs": 0, "bytes": 0, "cands": [], "found": 0}
+                    yield env.process(_bucket_all(env, _new, bid, lut, _a2))
+                    acc["rpcs"] += _a2["rpcs"]; acc["bytes"] += _a2["bytes"]
+                    acc["rpcs_eval"] = acc.get("rpcs_eval", 0) + _a2["rpcs"]
+                    acc["bucket_found"] = acc.get("bucket_found", 0) + (_a2["found"] > 0)
+                    acc["cands"].extend(_a2["cands"])
+                return
             _new = [nd for nd in nodes if nd.node_id not in contacted]
             for nd in _new:
                 contacted.add(nd.node_id)
             if _new:
                 _a2 = {"rpcs": 0, "bytes": 0, "cands": []}
-                yield env.process(_adc_all(env, _new, query_vector, codebook, _a2))
+                yield env.process(_adc_all(env, _new, query_vector, codebook, _a2, lut))
                 acc["rpcs"] += _a2["rpcs"]; acc["bytes"] += _a2["bytes"]
                 # candidate-evaluation RPC: một request mỗi peer MỚI chạm.
                 acc["rpcs_eval"] = acc.get("rpcs_eval", 0) + _a2["rpcs"]
                 acc["cands"].extend(_a2["cands"])
 
-        yield env.all_of([env.process(_one_probe(env, pk, _pa)) for pk in _specs])
+        yield env.all_of([env.process(_one_probe(env, pk, bid, _pa)) for pk, bid in _specs])
         total_hops += _pa["hops"]; total_rpcs += _pa["rpcs"]
         disc_rounds += _pa["hops"]; disc_rpcs += _pa["rpcs"]
         disc_bytes += _pa["bytes"]
@@ -638,4 +770,8 @@ def query_pipeline_process(env, network_nodes, query_vector, codebook, target_k=
         "shard_misses": shard_misses,
         "routing_mode": _mode,
     }
+    if _mode == 'bucket_lsh':
+        stats["bucket_probes_found"] = int(_pa.get("bucket_found", 0))
+    if collect is not None:
+        collect["contacted"] = set(contacted)
     return retrieved_tags, total_hops, num_unique_candidates, stats

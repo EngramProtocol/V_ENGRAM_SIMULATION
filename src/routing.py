@@ -258,6 +258,33 @@ def generate_probe_keys(vector, table_idx, T=DEFAULT_MULTI_PROBE, c=DEFAULT_PROB
         keys.append(base ^ (1 << (159 - int(j))))   # lật bit j (bit 0 = MSB)
     return keys
 
+def bucket_dht_key(table_idx, b, label):
+    """Bucket-LSH trên overlay (ppna-r1 đợt 2): khoá DHT của bucket là băm của
+    (bảng, b, nhãn b bit), như baselines.py mô tả ("mỗi object lưu dưới HASH của
+    nhãn bucket"). Băm phá thứ tự nên bucket kề nhau không nằm gần nhau."""
+    s = f"bucket_t{int(table_idx)}_b{int(b)}_{int(label)}".encode("utf-8")
+    return int(hashlib.sha256(s).hexdigest(), 16) % (1 << 160)
+
+
+def bucket_probe_specs(vector, T, b):
+    """Các probe Bucket-LSH của một query: với mỗi bảng, nhãn b bit của query và
+    T-1 nhãn lật một bit có |projection| nhỏ nhất trong b bit đầu (cùng quy tắc
+    với baselines._probe_labels). Trả list (khoá DHT, (bảng, nhãn))."""
+    if not PROJECTION_MATRICES:
+        initialize_lsh_projections()
+    vec = np.asarray(vector).flatten()
+    out = []
+    for t in range(NUM_PROJECTIONS):
+        proj = np.dot(vec, PROJECTION_MATRICES[t])
+        label = int("".join(map(str, (proj[:b] > 0).astype(int))), 2)
+        labs = [label]
+        if T > 1:
+            for i in np.argsort(np.abs(proj[:b]))[:T - 1]:
+                labs.append(label ^ (1 << (b - 1 - int(i))))
+        out.extend((bucket_dht_key(t, b, lab), (t, lab)) for lab in labs)
+    return out
+
+
 USER_SECRET_KEY = b"v_engram_dummy_secret_key"
 
 def generate_placement_key(object_tag, shard_id):
