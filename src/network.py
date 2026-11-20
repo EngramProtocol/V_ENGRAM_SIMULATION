@@ -200,6 +200,42 @@ def bootstrap_network(env, num_nodes, k_size_far=50, k_size_near=50):
     return network_nodes
 
 
+def refresh_buckets(network_nodes, rng, k_bucket=None):
+    """ppna-r1 đợt 3: một vòng làm mới k-bucket như bước join của Kademlia gốc
+    (Maymounkov và Mazières 2002, mục 2.3: sau khi tra chính mình, peer "refreshes
+    all k-buckets further away than its closest neighbor"). Join của simulator
+    (bootstrap_network) bỏ bước này.
+
+    Mỗi peer, với từng bucket xa hơn bucket chứa láng giềng gần nhất của nó, tra một
+    ID ngẫu nhiên nằm trong vùng của bucket đó (khoảng cách XOR trong [2^i, 2^(i+1)))
+    bằng lookup thật xuất phát từ chính nó, rồi nạp các peer tìm được vào k-bucket;
+    các peer đó cũng học về nó, như bước join. ID ngẫu nhiên lấy từ rng riêng (numpy
+    RandomState), không dùng random của Python, nên dòng số ngẫu nhiên của phần mô
+    phỏng không đổi. Trả về thống kê của vòng làm mới."""
+    k_bucket = k_bucket or K_BUCKET
+    n_lookups = 0
+    for node in network_nodes:
+        contacts = [p for b in node.kbuckets.values() for p in b]
+        if not contacts:
+            continue
+        nearest = min(contacts, key=lambda p: p.node_id ^ node.node_id)
+        b0 = node.kb_index(nearest.node_id)
+        for i in range(b0 + 1, 160):
+            low = int.from_bytes(rng.bytes(20), "big") & ((1 << i) - 1)
+            target = node.node_id ^ ((1 << i) | low)
+            found, _h, _r = iterative_find_k_closest_nodes(
+                target, node, alpha=DEFAULT_ALPHA, k=k_bucket, phase="refresh")
+            n_lookups += 1
+            for peer in found:
+                node.kb_add(peer, k_bucket)
+                peer.kb_add(node, k_bucket)
+    for node in network_nodes:
+        node.routing_table = set(p for b in node.kbuckets.values() for p in b)
+    sz = [len(n.routing_table) for n in network_nodes]
+    return {"lookups": n_lookups, "contacts_mean": float(np.mean(sz)),
+            "contacts_min": int(min(sz)), "contacts_max": int(max(sz))}
+
+
 def data_ingestion_process(
     env,
     network_nodes,

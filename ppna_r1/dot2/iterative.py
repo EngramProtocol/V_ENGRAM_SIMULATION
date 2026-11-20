@@ -64,7 +64,8 @@ import src.routing as rt                # noqa: E402
 from src.diag import build_diagnostics  # noqa: E402
 from src.evaluation import compute_stage5_metrics  # noqa: E402
 from src.network import (bootstrap_network, data_ingestion_process,  # noqa: E402
-                         query_pipeline_process, reset_global_metadata_dht)
+                         query_pipeline_process, refresh_buckets,
+                         reset_global_metadata_dht)
 from src.oracle import (XorIndex, build_full_tables, remove_dead,  # noqa: E402
                         restore_routing_state, save_routing_state)
 
@@ -156,8 +157,8 @@ class Ctx:
         D = f"./data/{a.dataset}"
         self.E = np.load(f"{D}_corpus_embeddings.npy")
         self.Q = np.load(f"{D}_query_embeddings.npy")
-        self.codes = np.load(f"{D}_pq_codes_m512.npy")
-        self.codebook = np.load(f"{D}_pq_codebook_m512.npy")
+        self.codes = np.load(f"{D}_pq_codes_{a.pq}.npy")
+        self.codebook = np.load(f"{D}_pq_codebook_{a.pq}.npy")
         self.gt_path = f"{D}_ground_truth.json"
         with open(self.gt_path, encoding="utf-8") as fh:
             self.gt = json.load(fh)
@@ -166,6 +167,7 @@ class Ctx:
         self.nodes = None
         self.by_id = None
         self.out = {"plan": a.plan, "dataset": a.dataset, "seed": a.seed, "nodes": a.nodes,
+                    "pq": a.pq, "dim": int(self.E.shape[1]),
                     "num_files": self.n_files, "n_query": self.n_run,
                     "commit": os.environ.get("RUN_COMMIT", ""), "env": dict(BASE_ENV),
                     "stages": {}, "variants": {}, "timing": {}}
@@ -180,7 +182,8 @@ def join_stage(ctx):
     a = ctx.a
     random.seed(a.seed)
     np.random.seed(a.seed % (2 ** 32))
-    rt.initialize_lsh_projections(a.seed)
+    # số chiều lấy từ embedding (jina 896); với 1024 chiều trùng lời gọi mặc định cũ
+    rt.initialize_lsh_projections(a.seed, vector_dim=int(ctx.E.shape[1]))
     reset_global_metadata_dht()
     set_query_rules(DEFAULT_RULES)
     t0 = time.time()
@@ -196,6 +199,19 @@ def join_stage(ctx):
     ctx.by_id = {n.node_id: n for n in ctx.nodes}
     rt._ALL_NODES = ctx.nodes
     ctx.tick("join", t0)
+    if getattr(a, "join_refresh", 0):
+        # đợt 3: join đầy đủ như Kademlia gốc (làm mới k-bucket sau join). Cùng bộ sinh
+        # số với kế hoạch refresh, nên base ở đây trùng refresh1_base của kế hoạch đó.
+        # Không đụng random của Python và đồng hồ mô phỏng.
+        rng = np.random.RandomState((a.seed * 104729 + 7) % (2 ** 32))
+        ctx.out["join_refresh"] = {}
+        for rnd in range(1, a.join_refresh + 1):
+            t1 = time.time()
+            info = refresh_buckets(ctx.nodes, rng, int(os.environ["K_BUCKET"]))
+            ctx.tick(f"join_refresh{rnd}", t1)
+            ctx.out["join_refresh"][str(rnd)] = info
+            print(f"[join + làm mới {rnd}] {info['lookups']} lookup, contact TB "
+                  f"{info['contacts_mean']:.1f} (min {info['contacts_min']})", flush=True)
     ctx.s_join = Snapshot(env.now)
     ctx.rs_join = save_routing_state(ctx.nodes)
     return ctx.s_join
@@ -440,9 +456,56 @@ def plan_lsh(ctx):
     a = ctx.a
     join_stage(ctx)
     bucket = {"b": int(a.lsh_b)}
-    st = ingest_stage(ctx, f"bucket_b{a.lsh_b}", placement="bucket", bucket=bucket)
+    st = ingest_stage(ctx, f"bucket_b{a.lsh_b}", placement="bucket", bucket=bucket,
+                      ingest_rule=a.ingest_rule)
     run_variant(ctx, st, f"bucket_b{a.lsh_b}_T{a.T}", T=a.T, mode="bucket_lsh", bucket=bucket,
                 extra={"bucket_b": int(a.lsh_b)})
+
+
+def plan_tk(ctx):
+    """Đợt 3: các điểm T và K của Bảng 5 trên mô hình iterative, cùng một mạng.
+    Biến thể base trùng từng số với base của nhóm sem ở đợt 2 (cùng seed)."""
+    join_stage(ctx)
+    st = ingest_stage(ctx, "main")
+    run_variant(ctx, st, "base")
+    for T in (1, 3, 5, 12):
+        run_variant(ctx, st, f"T{T}_K20", T=T)
+    for K in (10, 40, 80):
+        run_variant(ctx, st, f"T8_K{K}", K=K)
+
+
+def plan_wl(ctx):
+    """Đợt 3: một điểm iterative cho mỗi workload của R1-4, kèm control random equal
+    peers khớp số peer theo từng query."""
+    join_stage(ctx)
+    st = ingest_stage(ctx, "main")
+    base = run_variant(ctx, st, "base", collect=True)
+    run_variant(ctx, st, "ctl_random_unique", mode="random_unique",
+                matches=[{"n_touch": n} for n in base["contacted"]])
+
+
+def plan_refresh(ctx):
+    """Đợt 3: join đầy đủ như Kademlia gốc, tức thêm vòng làm mới k-bucket sau join
+    (refresh_buckets). Sau mỗi vòng: ingest lại từ đầu (cùng trạng thái số ngẫu nhiên
+    như các kế hoạch khác) rồi chạy cấu hình chính, full round budget và truy vấn
+    oracle. Vòng làm mới dùng bộ sinh số riêng nên ghép cặp được với nhóm sem."""
+    a = ctx.a
+    join_stage(ctx)
+    rng = np.random.RandomState((a.seed * 104729 + 7) % (2 ** 32))
+    ctx.out["refresh"] = {}
+    for rnd in range(1, a.refresh_rounds + 1):
+        rt.LOOKUP_STATS = {}
+        t0 = time.time()
+        info = refresh_buckets(ctx.nodes, rng, int(os.environ["K_BUCKET"]))
+        ctx.tick(f"refresh{rnd}", t0)
+        info["lookup_stats"] = rt.lookup_stats_summary()
+        ctx.out["refresh"][str(rnd)] = info
+        print(f"[làm mới {rnd}] {info['lookups']} lookup, contact TB {info['contacts_mean']:.1f} "
+              f"(min {info['contacts_min']})", flush=True)
+        st = ingest_stage(ctx, f"refresh{rnd}")
+        run_variant(ctx, st, f"refresh{rnd}_base")
+        run_variant(ctx, st, f"refresh{rnd}_t7_exhaust-all_R15", rules=("exhaust", "all", 15))
+        run_variant(ctx, st, f"refresh{rnd}_q_oracle", mode="oracle", oracle=XorIndex(ctx.nodes))
 
 
 def plan_ws(ctx):
@@ -473,7 +536,8 @@ def plan_probe(ctx):
 
 
 PLANS = {"sem": plan_sem, "dec": plan_dec, "lsh": plan_lsh, "loss": plan_loss,
-         "ws": plan_ws, "probe": plan_probe}
+         "ws": plan_ws, "probe": plan_probe, "tk": plan_tk, "wl": plan_wl,
+         "refresh": plan_refresh}
 
 
 def main():
@@ -491,16 +555,28 @@ def main():
     ap.add_argument("--loss", default="", help="mức mất peer, vd. 0.20,0.30")
     ap.add_argument("--r-list", default="2,3", help="r của kế hoạch loss")
     ap.add_argument("--probe-docs", type=int, default=2000)
+    ap.add_argument("--pq", default="m512", help="biến thể PQ của dữ liệu (jina: m448)")
+    ap.add_argument("--ingest-rule", default="stable,all,15",
+                    help="quy tắc dừng của ingest cho kế hoạch lsh, vd. exhaust,all,15")
+    ap.add_argument("--refresh-rounds", type=int, default=2, help="số vòng làm mới bucket")
+    ap.add_argument("--join-refresh", type=int, default=0,
+                    help="số vòng làm mới k-bucket ngay sau join, cho mọi kế hoạch (0 = join cũ)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
+    _ir = a.ingest_rule.split(",")
+    if len(_ir) != 3 or _ir[0] not in ("stable", "exhaust") or _ir[1] not in ("all", "topk"):
+        raise SystemExit("--ingest-rule phải có dạng stable|exhaust,all|topk,R_max")
+    a.ingest_rule = (_ir[0], _ir[1], int(_ir[2]))
     a.loss = [float(x) for x in a.loss.split(",") if x.strip()]
     a.extra_k = [int(x) for x in a.extra_k.split(",") if x.strip()]
     a.r_list = [int(x) for x in a.r_list.split(",") if x.strip()]
     if a.plan == "lsh" and a.lsh_b is None:
         raise SystemExit("kế hoạch lsh cần --lsh-b")
+    if a.plan == "refresh" and a.join_refresh:
+        raise SystemExit("kế hoạch refresh tự làm mới bucket; không dùng thêm --join-refresh")
     ctx = Ctx(a)
-    print(f"[*] đợt 2 | kế hoạch {a.plan} | {a.dataset} | N = {a.nodes} | seed {a.seed} | "
-          f"{ctx.n_files} object | {ctx.n_run} query", flush=True)
+    print(f"[*] mô hình iterative | kế hoạch {a.plan} | {a.dataset} | N = {a.nodes} | seed {a.seed} | "
+          f"{ctx.n_files} object | {ctx.n_run} query | PQ {a.pq} | {ctx.E.shape[1]} chiều", flush=True)
     PLANS[a.plan](ctx)
     ctx.out["timing"]["total"] = round(time.time() - ctx.t_start, 2)
     ctx.out["peak_rss_mb"] = peak_rss_mb()
