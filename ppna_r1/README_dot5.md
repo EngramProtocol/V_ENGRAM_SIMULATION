@@ -46,6 +46,10 @@ theo seed với số lý tưởng của đợt 1.
 - **Cùng churn**: số lượt rời mạng ở mọi lần đo phải trùng file lý tưởng cùng seed.
 - **Chạy tiếp**: smoke test dừng một job giữa chừng rồi chạy tiếp từ checkpoint; kết quả phải trùng lần
   chạy liền một mạch.
+- **Mốc không churn của mô hình lý tưởng**: `main_churn_engine.py` đo lần đầu sau warm-up. Bước `t0`
+  (`ppna_r1/dot5/ideal_t0.py`) dựng đúng mạng và ingest của nó rồi đo một lần trước mọi bước churn, để tách
+  suy giảm do churn (R@5 trung bình các lần đo trừ R@5 lúc t = 0, trong cùng một mô hình) khỏi khác biệt
+  tĩnh giữa hai mô hình (khoá 63 bit, rerank toàn bộ ứng viên, so với khoá 160 bit và κ = 30 mỗi peer).
 
 ## Chạy
 
@@ -62,5 +66,7 @@ Theo dõi: `tail -3 ppna_r1/logs_dot5/run.log`; xong khi có dòng `XONG ĐỢT 
 tưởng ở `ppna_r1/out_dot1/churn` và số tĩnh ở `ppna_r1/out_dot3/tk_r` (đặt `IDEAL_ROOT`, `STATIC_ROOT` nếu
 để chỗ khác).
 
-**Thời gian ước:** khoảng 30 giờ một nhân (job r = 4 dài nhất, khoảng 2 giờ). Job bị ngắt chạy tiếp từ
-checkpoint (`<file kết quả>.ckpt`, ghi mỗi 15 phút); chạy lại đúng lệnh trên là đủ.
+**Thời gian:** khoảng 12 giờ một nhân trên máy thử 2 nhân (một job r = 4 khoảng 40 phút, r = 1 sửa mỗi
+480 phút khoảng 20 phút, r = 1 không sửa khoảng 10 phút), tức khoảng 2 giờ trên server 8 nhân với 7 job song
+song. Job bị ngắt chạy tiếp từ checkpoint (`<file kết quả>.ckpt`, ghi mỗi 15 phút); chạy lại đúng lệnh trên
+là đủ.

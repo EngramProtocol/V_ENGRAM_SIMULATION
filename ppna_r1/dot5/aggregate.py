@@ -123,7 +123,7 @@ def fci(c, nd=1):
     return f'{c["mean"]:+.{nd}f} [{c["lo"]:+.{nd}f}; {c["hi"]:+.{nd}f}] dương {c["pos"]}/{c["n"]}'
 
 
-def summarize(root, ideal_root, static_root):
+def summarize(root, ideal_root, static_root, ideal_t0_root=None):
     out = {'configs': {}, 'regression': {}}
     missing = []
     for r, rep in CONFIGS:
@@ -136,21 +136,33 @@ def summarize(root, ideal_root, static_root):
                'seeds_iter': [s for s in SEEDS if it[s]], 'dep_match': None}
         si = {s: stats(it[s]) for s in SEEDS if it[s]}
         sd = {s: stats(idl[s]) for s in SEEDS if idl[s]}
+        both = [s for s in SEEDS if s in si and s in sd]
         for k in ('phys_min', 'route_min', 'r5_end', 'r5_mean', 'r5_min', 'footprint', 'msg22'):
             row['iter'][k] = [si[s][k] for s in SEEDS if s in si]
             row['ideal'][k] = [sd[s][k] for s in SEEDS if s in sd]
+            if len(both) > 1:
+                row['diff'][k] = ci([si[s][k] - sd[s][k] for s in both])
         for k in ('r5_end_nr', 'r5_mean_nr', 'route_min_nr'):
             row['iter'][k] = [si[s][k] for s in SEEDS if s in si and k in si[s]]
         nr = [s for s in SEEDS if s in si and 'r5_mean_nr' in si[s]]
         if len(nr) > 1:
             row['diff']['replace_gain'] = ci([si[s]['r5_mean'] - si[s]['r5_mean_nr'] for s in nr])
-        # suy giảm do churn trong chính mô hình iterative: R@5 TB các lần đo trừ R@5 lúc t = 0
-        pre = [s for s in SEEDS if it.get(s) and it[s].get('pre')]
-        if len(pre) > 1:
-            row['diff']['churn_drop'] = ci([si[s]['r5_mean'] - it[s]['pre']['final_r5'] for s in pre])
-            both = [s for s in SEEDS if s in si and s in sd]
-            if len(both) > 1:
-                row['diff'][k] = ci([si[s][k] - sd[s][k] for s in both])
+        # mốc không churn của từng mô hình: iterative đo ngay sau ingest (pre); lý tưởng tính bằng ideal_t0.py
+        it0 = {s: it[s]['pre']['final_r5'] for s in SEEDS if it[s] and it[s].get('pre')}
+        id0 = {s: d['final_r5'] for s in SEEDS
+               for d in [read(f'{ideal_t0_root}/r{r}_s{s}.json') if ideal_t0_root else None] if d}
+        row['iter']['r5_t0'] = [it0[s] for s in SEEDS if s in it0]
+        row['ideal']['r5_t0'] = [id0[s] for s in SEEDS if s in id0]
+        a_ = [s for s in SEEDS if s in it0 and s in si]
+        b_ = [s for s in SEEDS if s in id0 and s in sd]
+        if len(a_) > 1:
+            row['diff']['iter_drop'] = ci([si[s]['r5_mean'] - it0[s] for s in a_])
+        if len(b_) > 1:
+            row['diff']['ideal_drop'] = ci([sd[s]['r5_mean'] - id0[s] for s in b_])
+        c_ = [s for s in SEEDS if s in it0 and s in si and s in id0 and s in sd]
+        if len(c_) > 1:
+            row['diff']['t0'] = ci([it0[s] - id0[s] for s in c_])
+            row['diff']['drop_diff'] = ci([(si[s]['r5_mean'] - it0[s]) - (sd[s]['r5_mean'] - id0[s]) for s in c_])
         # cùng dòng số phiên: số lượt rời mạng ở mọi lần đo phải trùng mô hình lý tưởng
         both = [s for s in SEEDS if s in si and s in sd]
         row['dep_match'] = [s for s in both if si[s]['departures'] == sd[s]['departures']]
@@ -200,7 +212,10 @@ def report(out, missing):
         g2 = lambda k, nd=1: fms(row['iter'].get(k, []), nd)   # noqa: E731
         print(f'    iterative, client không thay peer hết giờ: R@5 TB {g2("r5_mean_nr")}, R@5 cuối {g2("r5_end_nr")}, '
               f'min định tuyến được {g2("route_min_nr")}; lợi của việc thay peer (R@5 TB) {fci(row["diff"].get("replace_gain"))}')
-        print(f'    iterative, R@5 TB các lần đo trừ R@5 lúc t = 0 (cùng job): {fci(row["diff"].get("churn_drop"))}')
+        print(f'    R@5 lúc t = 0 (không churn): lý tưởng {fms(row["ideal"].get("r5_t0", []))}, iterative {g2("r5_t0")}, '
+              f'iterative − lý tưởng {fci(row["diff"].get("t0"))}')
+        print(f'    suy giảm do churn (R@5 TB các lần đo − R@5 lúc t = 0): lý tưởng {fci(row["diff"].get("ideal_drop"))}; '
+              f'iterative {fci(row["diff"].get("iter_drop"))}; hiệu hai mức suy giảm {fci(row["diff"].get("drop_diff"))}')
         if row['dep_checked']:
             print(f'    cùng lượt rời mạng với lý tưởng ở mọi lần đo: {len(row["dep_match"])}/{len(row["dep_checked"])} seed')
         c = row['costs']
@@ -289,12 +304,14 @@ def main():
     ap.add_argument('--out-root', default='ppna_r1/out_dot5')
     ap.add_argument('--ideal-root', default='ppna_r1/out_dot1/churn')
     ap.add_argument('--static-root', default='ppna_r1/out_dot3/tk_r')
+    ap.add_argument('--ideal-t0-root', default='ppna_r1/out_dot5/ideal_t0',
+                    help='R@5 lúc t = 0 của mô hình lý tưởng (ppna_r1/dot5/ideal_t0.py)')
     ap.add_argument('--summary', default=None)
     ap.add_argument('--smoke-check', default=None, metavar='DIR')
     a = ap.parse_args()
     if a.smoke_check:
         raise SystemExit(smoke_check(a.smoke_check))
-    out, missing = summarize(a.out_root, a.ideal_root, a.static_root)
+    out, missing = summarize(a.out_root, a.ideal_root, a.static_root, a.ideal_t0_root)
     if a.summary:
         with open(a.summary, 'w', encoding='utf-8') as fh:
             json.dump({'summary': out, 'missing': missing}, fh, indent=1, ensure_ascii=False)

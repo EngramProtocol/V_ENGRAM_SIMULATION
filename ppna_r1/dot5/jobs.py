@@ -30,8 +30,9 @@ def _load(name, rel):
 D1 = _load('dot1_jobs', 'dot1/jobs.py')
 SEEDS = D1.SEEDS
 CHURN_CONFIGS = D1.CHURN_CONFIGS          # [(1, 0), (1, 480), (4, 1320)]
-# thời gian ước (giây, một nhân) theo cấu hình; đo ở lần chạy thử, dùng để xếp job dài chạy trước
-EST = {(1, 0): 2100, (1, 480): 3600, (4, 1320): 6600}
+# thời gian (giây, một nhân) theo cấu hình, đo trên máy 2 nhân chạy 2 job song song; dùng để xếp job dài
+# chạy trước và ước thời gian còn lại
+EST = {(1, 0): 650, (1, 480): 1250, (4, 1320): 2500}
 
 
 def ch(r, rep, seed, nodes=10000, nq=200, ses=120, duration=None, ds='code', prio=1, out_root=OUT,

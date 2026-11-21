@@ -7,8 +7,8 @@
 #   source venv/bin/activate
 #   tmux new -s dot5 -d "bash ~/V_ENGRAM_SIMULATION/ppna_r1/run_dot5.sh"
 #
-# Ba bước (STAGES, mặc định cả ba): smoke, run (30 job), report
-# (ppna_r1/dot5_report.txt và ppna_r1/dot5_summary.json).
+# Bốn bước (STAGES, mặc định cả bốn): smoke, run (30 job), t0 (R@5 lúc t = 0 của mô hình lý tưởng, vài phút),
+# report (ppna_r1/dot5_report.txt và ppna_r1/dot5_summary.json).
 # Chạy lại đúng lệnh sau khi bị ngắt: job đã xong với cùng commit được bỏ qua, job đang dở chạy tiếp
 # từ checkpoint của nó (<file kết quả>.ckpt).
 # Tuỳ chọn: PARALLEL (mặc định nproc - 1), MIN_FREE_GB (4), IDEAL_ROOT, STATIC_ROOT, PY.
@@ -21,7 +21,7 @@ if [ -z "${PY:-}" ]; then
     if [ -x venv/bin/python ]; then PY=venv/bin/python; else PY=python3; fi
 fi
 export PY
-STAGES="${STAGES:-smoke run report}"
+STAGES="${STAGES:-smoke run t0 report}"
 NP=$(nproc)
 PARALLEL="${PARALLEL:-$(( NP > 1 ? NP - 1 : 1 ))}"
 MIN_FREE_GB="${MIN_FREE_GB:-4}"
@@ -76,9 +76,14 @@ for st in $STAGES; do
         rc=$?
         echo "$(date -u +%FT%TZ) runner mã thoát $rc" | tee -a "$LOG/run.log"
         ;;
+    t0)
+        OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 "$PY" ppna_r1/dot5/ideal_t0.py --meta-anchors 1 4 \
+            --out-dir ppna_r1/out_dot5/ideal_t0 | tee "$LOG/ideal_t0.log"
+        ;;
     report)
         "$PY" ppna_r1/dot5/aggregate.py --out-root ppna_r1/out_dot5 --ideal-root "$IDEAL_ROOT" \
-            --static-root "$STATIC_ROOT" --summary ppna_r1/dot5_summary.json > ppna_r1/dot5_report.txt 2>&1
+            --static-root "$STATIC_ROOT" --ideal-t0-root ppna_r1/out_dot5/ideal_t0 \
+            --summary ppna_r1/dot5_summary.json > ppna_r1/dot5_report.txt 2>&1
         rc=$?
         echo "$(date -u +%FT%TZ) report mã thoát $rc: ppna_r1/dot5_report.txt" | tee -a "$LOG/run.log"
         tail -5 ppna_r1/dot5_report.txt
