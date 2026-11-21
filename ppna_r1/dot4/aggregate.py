@@ -62,8 +62,8 @@ def summarize(root):
                 e = {'join': jname, 'recall_mean': st.mean(r), 'recall_sd': st.stdev(r), 'recall': r,
                      'peers_pct': st.mean(x['pct_contacted'] for x in xs),
                      'rpc_mean': st.mean(x['mean_rpcs'] for x in xs),
-                     'rpc_routing_mean': st.mean(x['disc_rpcs'] for x in xs),
-                     'rpc_eval_mean': st.mean(x['pay_rpcs'] for x in xs),
+                     'rpc_routing_mean': st.mean(x['rpc_routing_mean'] for x in xs),
+                     'rpc_eval_mean': st.mean(x['rpc_eval_mean'] for x in xs),
                      'rounds_mean': st.mean(x['mean_rounds'] for x in xs)}
                 if row['ideal']:
                     e['minus_ideal'] = list(ci([a - b for a, b in zip(r, row['ideal']['recall'])]))

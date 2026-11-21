@@ -75,12 +75,14 @@ for st in $STAGES; do
         "$PY" ppna_r1/dot1/runner.py --jobs "$LOG/jobs.jsonl" --parallel "$PARALLEL" \
             --big-parallel "$BIG_PARALLEL" --min-free-gb "$MIN_FREE_GB" $GROUPS_ARG \
             --log "$LOG/run.log" --logdir "$LOG"
-        echo "$(date -u +%FT%TZ) runner mã thoát $?" | tee -a "$LOG/run.log"
+        rc=$?
+        echo "$(date -u +%FT%TZ) runner mã thoát $rc" | tee -a "$LOG/run.log"
         ;;
     report)
         "$PY" ppna_r1/dot4/aggregate.py --out-root ppna_r1/out_dot4 \
             --summary ppna_r1/dot4_summary.json > ppna_r1/dot4_report.txt 2>&1
-        echo "$(date -u +%FT%TZ) report mã thoát $?: ppna_r1/dot4_report.txt" | tee -a "$LOG/run.log"
+        rc=$?
+        echo "$(date -u +%FT%TZ) report mã thoát $rc: ppna_r1/dot4_report.txt" | tee -a "$LOG/run.log"
         tail -5 ppna_r1/dot4_report.txt
         ;;
     *) echo "Không biết bước '$st'"; exit 1 ;;
