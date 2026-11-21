@@ -49,6 +49,7 @@ def main():
     ap.add_argument('--datasets', default='code,scifact')
     ap.add_argument('--seeds', default=','.join(str(s) for s in SEEDS))
     ap.add_argument('--threads', default='2')
+    ap.add_argument('--suffix', default='', help='hậu tố tên model, ví dụ _n2000 cho overlay 2.000 node')
     a = ap.parse_args()
     cli = os.path.join(a.lh, 'build', 'hash_functions_core', 'Vortex', 'vortex_v1_cli')
     env = dict(os.environ, VORTEX_ROOT=os.path.abspath(a.lh))
@@ -64,7 +65,7 @@ def main():
                  '--target_skeleton', ts, '--output', nsw])
         base = os.path.join(a.data, ds, f'{ds}_base.fvecs')
         for s in seeds:
-            name = f'{ds}_s{s}'
+            name = f'{ds}{a.suffix}_s{s}'
             out = os.path.join(a.vx, 'methods', f'vortex_v1_{name}')
             # model đã có chỉ giữ lại khi huấn luyện đúng cấu hình hiện tại (ghi trong semord_config.json)
             if os.path.exists(os.path.join(out, 'vortex.json')):

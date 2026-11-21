@@ -1,4 +1,4 @@
-# Semord: so sánh với artifact của tác giả (tag `ppna-r1-semord3`)
+# Semord: so sánh với artifact của tác giả (tag `ppna-r1-semord4`)
 
 ## Mục đích
 
@@ -30,7 +30,8 @@ literal `0ULL` gọi constructor `ModelInput` bị mơ hồ (tác giả build tr
   benchmark lặp lại cho cùng kết quả. Ngân sách là `max_query_nodes` (B): 16 (mặc định trong bài
   Semord), 49 (bằng số peer V-Engram liên lạc với K = 2) và 225 (khoảng bằng số ứng viên V-Engram
   xét). Tham số lập kế hoạch truy vấn (vòng ring quanh owner, số vùng, số peer mỗi vùng) chọn trên
-  query validation cho từng B; báo cả tham số mặc định của artifact.
+  query validation cho từng B trong 4 đến 8 tổ hợp, gồm cả kế hoạch tra trọn từng vùng; báo cả tham
+  số mặc định của artifact.
 - Cùng corpus, cùng 500 query test, cùng ground truth và Recall@5 như mọi bảng khác; 10 seed.
 - Mọi bước chạy một luồng (OMP_NUM_THREADS=1): dựng HNSW nhiều luồng cho đồ thị khác nhau giữa các
   lần chạy, nên skeleton và model VHash cũng khác. Máy khác thư viện BLAS vẫn có thể cho model hơi
@@ -52,7 +53,7 @@ Query validation (`data/*_val_query_embeddings.npy`) đã có từ bước chu�
 
 ```bash
 cd ~/V_ENGRAM_SIMULATION
-git fetch origin --tags && git checkout ppna-r1-semord3
+git fetch origin --tags && git checkout ppna-r1-semord4
 sha256sum -c ppna_r1/SHA256SUMS_semord
 source venv/bin/activate
 tmux new -s semord -d "bash ~/V_ENGRAM_SIMULATION/ppna_r1/run_semord.sh"
@@ -77,13 +78,34 @@ nên chạy lại sau một lần chạy dở với cấu hình khác thì phầ
 
 **Thời gian ước trên server (8 nhân):** setup 10 đến 20 phút (biên dịch; thêm 5 đến 10 phút nếu
 phải build OpenBLAS), artifact khoảng 20 phút (một luồng: chọn cấu hình, huấn luyện 20 model, build
-benchmark), V-Engram 20 job khoảng 15 phút, Semord validation 28 lần chạy và test 100 lần chạy
+benchmark), V-Engram 20 job khoảng 15 phút, Semord validation 38 lần chạy và test 100 lần chạy
 khoảng 20 phút với 7 tiến trình (mỗi tiến trình khoảng 0,8 GB RAM). Tổng khoảng 1 giờ đến 1 giờ 30.
+
+## Điểm 2.000 peer
+
+Điểm quy mô thứ hai, để thấy xu hướng khi N tăng (simulator của artifact không chạy được ở 10.000
+peer). Chạy sau `run_semord.sh`, dùng lại setup, dữ liệu và build:
+
+```bash
+bash ppna_r1/run_semord_n2000.sh
+```
+
+- **Semord.** Cấu hình VHash cho overlay 2.000 node chọn bằng bộ chọn của tác giả trên query
+  validation (`--node-count-values 2000`), chạy một lần rồi cố định trong
+  `semord/sel/<ds>_sel_n2000.json`; model huấn luyện riêng, tên `vortex_v1_<ds>_n2000_s<seed>`.
+  Ngân sách B = 53 và B = 97, bằng số peer V-Engram liên lạc với K = 2 và K = 4 ở 2.000 peer (trung
+  bình 10 seed: 52,7 và 97,2, tức 2,6% và 4,9% mạng); kế hoạch truy vấn chọn trên validation cho
+  từng B, kèm kế hoạch mặc định ở B = 53.
+- **V-Engram.** K = 4 (= N/500, cùng tỉ lệ N/K với cấu hình chính), thêm K = 2 (cùng số peer liên
+  lạc tuyệt đối như K = 2 ở 1.000 peer) và K = 10.
+- Mỗi tiến trình Semord ở 2.000 node cần khoảng 2,4 GB RAM.
+- Kết quả: `out_semord/runs_n2000`, `out_semord/vk2000`, `out_semord/sel_n2000`,
+  `semord_report_n2000.txt`, `semord_summary_n2000.json`.
 
 ## Kết quả đã có
 
-Lần chạy trên máy thử (cùng script, cùng commit của artifact, cùng cấu hình VHash cố định) và phân
-tích nằm trong `claude/Bao_cao_V_Engram_PPNA_Semord.md` của Project. Lần chạy trên server để mọi số
-của bài sinh từ cùng một release. Model VHash phụ thuộc nhẹ vào thư viện BLAS: máy thử dùng BLAS
-tham chiếu của netlib; với OpenBLAS 0.3.26 tự build, SciFact seed 1, B = 49 cho R@5 69,48 so với
-69,52 (kế hoạch truy vấn chọn trên validation) và trùng 35,40 (kế hoạch mặc định).
+Số của bài lấy từ lần chạy bằng chính release này trên máy thử (2 nhân, BLAS và LAPACK tham chiếu
+của netlib), ở cả 1.000 và 2.000 peer; phân tích nằm trong `claude/Bao_cao_V_Engram_PPNA_Semord.md`
+của Project. Chạy lại toàn bộ từ đầu ở 1.000 peer cho cùng mọi số, trừ các số đo thời gian. Model
+VHash phụ thuộc nhẹ vào thư viện BLAS: với OpenBLAS 0.3.26 tự build, hai seed thử ở B = 49 lệch 0,00
+đến 0,04 điểm R@5 trên SciFact và tới 0,76 điểm trên code ở từng seed.

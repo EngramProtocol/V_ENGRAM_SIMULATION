@@ -29,13 +29,20 @@ DEFAULT = (1, 10, 3, 2)   # rapid hops, extended centroids, top nodes, fallback 
 def grid_for_budget(B):
     """Tổ hợp thử trên validation. Mặc định của artifact chứa tối đa khoảng 64 peer, nên với B lớn
     cần thêm vùng hoặc thêm peer mỗi vùng. Mở rộng vòng ring quanh owner (rapid hops) đã thử ở
-    B = 16 trên code: kém hơn mặc định (52,2 và 64,3 so với 65,3) và chậm gấp ba, nên không quét."""
+    B = 16 trên code: kém hơn mặc định (52,2 và 64,3 so với 65,3) và chậm gấp ba, nên không quét.
+    (1, 64, 32, 2) và (1, 64, B, 2) tra trọn từng vùng khi vùng lớn: mỗi vùng (centroid) có khoảng
+    N/K node, tức khoảng 31 node với SciFact ở 2.000 node, nên 16 peer mỗi vùng chỉ phủ nửa vùng;
+    (1, 64, B, 2) bỏ hẳn giới hạn số peer mỗi vùng, tra lần lượt từng vùng theo thứ hạng tới hết
+    ngân sách. Với vùng nhỏ các kế hoạch này gần như trùng (1, 64, 16, 2); khi hoà recall, kế hoạch
+    đứng trước trong danh sách được chọn."""
     g = [DEFAULT,
          (1, max(10, math.ceil(B / 4)), 3, 2),             # thêm vùng
          (1, 10, max(3, math.ceil(B / 12)), 2),            # thêm peer mỗi vùng
          (1, max(10, math.ceil(B / 8)), max(3, math.ceil(B / 24)), 2),
          (1, 32, 8, 2),
-         (1, 64, 16, 2)]
+         (1, 64, 16, 2),
+         (1, 64, 32, 2),
+         (1, 64, B, 2)]
     out = []
     for x in g:
         if x not in out:
@@ -107,7 +114,7 @@ def job_tag(ds, seed, qset, B, cfg, N):
 def method_config(a, ds, seed):
     """Cấu hình VHash đã dùng để huấn luyện model vortex_v1_<ds>_s<seed> (semord_config.json)."""
     p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(a.bench))), 'methods',
-                     f'vortex_v1_{ds}_s{seed}', 'semord_config.json')
+                     f'vortex_v1_{ds}{getattr(a, "method_suffix", "")}_s{seed}', 'semord_config.json')
     try:
         return json.load(open(p))
     except (OSError, ValueError):
@@ -131,7 +138,8 @@ def run_one(a, ds, seed, qset, B, cfg, out_dir):
     q = f'{D}/{ds}_val_query.fvecs' if qset == 'val' else f'{D}/{ds}_query.fvecs'
     g = f'{D}/{ds}_val_groundtruth.ivecs' if qset == 'val' else f'{D}/{ds}_groundtruth.ivecs'
     cmd = [a.bench, '--base', f'{D}/{ds}_base.fvecs', '--query', q, '--groundtruth', g,
-           '--method', f'vortex_v1_{ds}_s{seed}', '--num-groups', str(a.nodes), '--seed', str(seed),
+           '--method', f'vortex_v1_{ds}{getattr(a, "method_suffix", "")}_s{seed}', '--num-groups', str(a.nodes),
+           '--seed', str(seed),
            '--final-k', '5', '--sub-k', '5', '--gt-k', '5',
            '--fuzzy-query-extended-hops', str(r), '--extended-center-groups', str(c),
            '--method-param', f'max_query_nodes={B}',
@@ -185,6 +193,7 @@ def main():
     ap.add_argument('--nodes', type=int, default=1000)
     ap.add_argument('--workers', type=int, default=2)
     ap.add_argument('--one', default='', help='B,r,c,t,f cho --stage one')
+    ap.add_argument('--method-suffix', default='', help='hậu tố tên model, ví dụ _n2000')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     seeds = [int(x) for x in a.seeds.split(',') if x]

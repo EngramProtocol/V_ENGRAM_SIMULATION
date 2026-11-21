@@ -1,6 +1,7 @@
-"""Job V-Engram ở N = 1.000 peer cho phép so với Semord: mô hình iterative, join đầy đủ (một vòng làm
-mới k-bucket), T = 8, K = 2 (= N/500, cùng tỉ lệ N/K với cấu hình chính), 4 và 10; code và SciFact,
-10 seed. Cùng định dạng job và bộ chạy ppna_r1/dot1/runner.py."""
+"""Job V-Engram cho phép so với Semord: mô hình iterative, join đầy đủ (một vòng làm mới k-bucket),
+T = 8; code và SciFact, 10 seed. Mặc định N = 1.000 với K = 2 (= N/500, cùng tỉ lệ N/K với cấu hình
+chính), thêm K = 4 và 10; ở N = 2.000 dùng --nodes 2000 --k 4 --extra-k 2,10. Cùng định dạng job và
+bộ chạy ppna_r1/dot1/runner.py."""
 import importlib.util
 import json
 import os
@@ -19,12 +20,12 @@ def _load(name, rel):
 D3 = _load('dot3_jobs', 'dot3/jobs.py')
 
 
-def build():
+def build(nodes=1000, k=2, extra_k='4,10'):
     J = []
     for s in D3.SEEDS:
         for ds in ('code', 'scifact'):
-            J.append(D3.it('vk1000', ds, 'ws', ds, s, nodes=1000, est=200, out_root=OUT,
-                           args=['--k', '2', '--extra-k', '4,10', '--join-refresh', '1']))
+            J.append(D3.it(f'vk{nodes}', ds, 'ws', ds, s, nodes=nodes, est=200 * nodes // 1000, out_root=OUT,
+                           args=['--k', str(k), '--extra-k', extra_k, '--join-refresh', '1']))
     return J
 
 
@@ -32,9 +33,12 @@ if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument('--write', required=True)
+    ap.add_argument('--nodes', type=int, default=1000)
+    ap.add_argument('--k', type=int, default=2)
+    ap.add_argument('--extra-k', default='4,10')
     a = ap.parse_args()
-    J = build()
+    J = build(a.nodes, a.k, a.extra_k)
     with open(a.write, 'w', encoding='utf-8') as fh:
         for j in J:
             fh.write(json.dumps(j, ensure_ascii=False) + '\n')
-    print(f'{len(J)} job V-Engram N = 1.000')
+    print(f'{len(J)} job V-Engram N = {a.nodes}')

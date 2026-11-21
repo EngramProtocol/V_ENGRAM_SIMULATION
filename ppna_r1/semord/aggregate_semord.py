@@ -43,9 +43,18 @@ def load_vengram(root):
     return rows
 
 
+def roles(root):
+    """Kế hoạch truy vấn chọn trên validation cho từng (corpus, B), từ val_best.json của run_semord.py."""
+    p = os.path.join(root, 'val_best.json')
+    if not os.path.exists(p):
+        return {}
+    return {tuple(k.split('/B')): tuple(v['config']) for k, v in json.load(open(p)).items()}
+
+
 def summarize(a):
     S = load_semord(a.semord, a.nodes)
     V = load_vengram(a.vengram)
+    sel = roles(a.semord)
     out = {'semord': {}, 'vengram': {}, 'paired': {}}
     for (ds, B, cfg), by in sorted(S.items()):
         if len(by) < len(SEEDS):
@@ -53,8 +62,11 @@ def summarize(a):
         xs = [by[s] for s in SEEDS]
         rec = [100 * x['recall'] for x in xs]
         msgs = [x['scalars'].get('overlay_runtime_hot_path_messages_mean', float('nan')) for x in xs]
+        chosen = sel.get((ds, str(B)))
+        role = ('chọn trên validation' if cfg == chosen else
+                'mặc định' if cfg == (1, 10, 3, 2) else 'không được chọn' if chosen else '')
         out['semord'][f'{ds}/B{B}/{"-".join(map(str, cfg))}'] = {
-            'dataset': ds, 'B': B, 'config': cfg,
+            'dataset': ds, 'B': B, 'config': cfg, 'role': role,
             'recall_mean': st.mean(rec), 'recall_sd': st.stdev(rec), 'recall': rec,
             'recall_recomputed_mean': 100 * st.mean(x['parity']['recall_recomputed'] for x in xs),
             'peers_mean': st.mean(x['queried_nodes']['mean'] for x in xs),
@@ -89,13 +101,14 @@ def summarize(a):
             'rpc_eval_mean': st.mean(x['rpc_eval_mean'] for x in xs),
             'metadata_gini_mean': st.mean(x['metadata_gini'] for x in xs),
         }
-    # hiệu ghép theo seed: Semord ở mỗi cấu hình trừ V-Engram K2
+    # hiệu ghép theo seed: Semord ở mỗi cấu hình trừ V-Engram ở từng K trong --ref-k
     for ks, s in out['semord'].items():
-        vk = out['vengram'].get(f"{s['dataset']}/K2")
-        if not vk:
-            continue
-        m, lo, hi, pos = ci([x - y for x, y in zip(s['recall'], vk['recall'])])
-        out['paired'][ks] = {'minus_vengram_K2': [m, lo, hi, pos]}
+        for k in a.ref_k.split(','):
+            vk = out['vengram'].get(f"{s['dataset']}/K{k}")
+            if not vk:
+                continue
+            m, lo, hi, pos = ci([x - y for x, y in zip(s['recall'], vk['recall'])])
+            out['paired'].setdefault(ks, {})[f'minus_vengram_K{k}'] = [m, lo, hi, pos]
     return out
 
 
@@ -108,6 +121,7 @@ def main():
     ap.add_argument('--semord', required=True)
     ap.add_argument('--vengram', required=True)
     ap.add_argument('--nodes', type=int, default=1000)
+    ap.add_argument('--ref-k', default='2', help='K của V-Engram để tính hiệu ghép, ví dụ 4,2')
     ap.add_argument('--out', required=True)
     a = ap.parse_args()
     o = summarize(a)
@@ -123,10 +137,14 @@ def main():
         for k, v in o['semord'].items():
             if v['dataset'] != ds:
                 continue
-            p = o['paired'].get(k, {}).get('minus_vengram_K2')
-            ps = f' | − V-Engram K2: {p[0]:+.2f} [{p[1]:+.2f}, {p[2]:+.2f}] dương {p[3]}/10' if p else ''
+            ps = ''
+            for rk in a.ref_k.split(','):
+                p = o['paired'].get(k, {}).get(f'minus_vengram_K{rk}')
+                if p:
+                    ps += f' | − V-Engram K{rk}: {p[0]:+.2f} [{p[1]:+.2f}, {p[2]:+.2f}] dương {p[3]}/10'
+            rs = f' | {v["role"]}' if v.get('role') else ''
             print(f'{"Semord B" + str(v["B"]) + " " + str(v["config"]):34s} {fmt(v["recall_mean"]) + " ± " + fmt(v["recall_sd"]):>12s} '
-                  f'{v["peers_mean"]:7.1f} {v["peers_pct"]:7.2f} {v["vectors_mean"]:8.0f} {v["vectors_pct"]:6.1f} {v["requests_mean"]:7.0f}{ps}')
+                  f'{v["peers_mean"]:7.1f} {v["peers_pct"]:7.2f} {v["vectors_mean"]:8.0f} {v["vectors_pct"]:6.1f} {v["requests_mean"]:7.0f}{ps}{rs}')
 
 
 if __name__ == '__main__':
