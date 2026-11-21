@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# SEMORD (ppna-r1-semord2): so V-Engram với Semord (arXiv 2609.25514) bằng artifact của tác giả,
+# SEMORD (ppna-r1-semord3): so V-Engram với Semord (arXiv 2609.25514) bằng artifact của tác giả,
 # cho R1-5. Hướng dẫn: ppna_r1/README_semord.md
 #
 #   source venv/bin/activate

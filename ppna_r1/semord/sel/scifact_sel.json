@@ -1,0 +1,34 @@
+{
+ "note": "Cấu hình VHash cố định cho so sánh Semord: vai trò best của vortex_model_selector (LearnedHash 542528c8) chạy ngày 21/11/2026 trên 500 query validation, eval-k 5, overlay 1.000 node, seed 20235956, một luồng; đây là cấu hình dùng trong báo cáo Semord. Bộ chọn chấm điểm có cả độ trễ và thời gian huấn luyện đo được, nên chạy lại có thể chọn cấu hình khác; vì vậy cấu hình được cố định ở đây. Đặt SEMORD_RESELECT=1 để chạy lại bộ chọn.",
+ "dataset": "scifact",
+ "query": "scifact_val_query.fvecs",
+ "seed": 20235956,
+ "eval_k": 5,
+ "node_count": 1000,
+ "candidates_evaluated": 38,
+ "best": {
+  "config": {
+   "target_skeleton": 5183,
+   "K": 64,
+   "centroid_knn": 8,
+   "cdf_models": "linear,cubic",
+   "cdf_branch": 32,
+   "enable_2opt": true,
+   "two_opt_iters": 4,
+   "graph_centroid_order": true
+  },
+  "objective_score": 0.8334740785365627,
+  "objective_score_scope": "phase2",
+  "recall_at_k_in_window": 0.8265625,
+  "recall_auc_log_window": 0.840989892428164,
+  "mean_rank_distance_norm": 0.10160711701717152,
+  "node_locality_score": 0.068993671875,
+  "overlay_match_score": 0.08017453181021524,
+  "locality_quality_score": 0.23017684701113333,
+  "latency_avg_ms": 0.033791740234375,
+  "train_time_ms": 0.095,
+  "model_size_bytes": 281968,
+  "centroid_count": 64,
+  "active_centroid_count": 64
+ }
+}

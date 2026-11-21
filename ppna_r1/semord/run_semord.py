@@ -104,11 +104,24 @@ def job_tag(ds, seed, qset, B, cfg, N):
     return f'{ds}_s{seed}_{qset}_N{N}_B{B}_r{r}_c{c}_t{t}_f{f}'
 
 
+def method_config(a, ds, seed):
+    """Cấu hình VHash đã dùng để huấn luyện model vortex_v1_<ds>_s<seed> (semord_config.json)."""
+    p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(a.bench))), 'methods',
+                     f'vortex_v1_{ds}_s{seed}', 'semord_config.json')
+    try:
+        return json.load(open(p))
+    except (OSError, ValueError):
+        return None
+
+
 def run_one(a, ds, seed, qset, B, cfg, out_dir):
     tag = job_tag(ds, seed, qset, B, cfg, a.nodes)
     out = os.path.join(out_dir, tag + '.json')
+    vcfg = method_config(a, ds, seed)
     if os.path.exists(out):
-        return json.load(open(out))
+        old = json.load(open(out))
+        if old.get('vhash_config') == vcfg:    # chỉ dùng lại kết quả của đúng model hiện tại
+            return old
     log = os.path.join(out_dir, 'logs', tag + '.jsonl')
     os.makedirs(os.path.dirname(log), exist_ok=True)
     if os.path.exists(log):
@@ -139,7 +152,8 @@ def run_one(a, ds, seed, qset, B, cfg, out_dir):
     res['parity'] = summarize_parity(res.pop('_parity', []), sizes, g)
     res.update({'dataset': ds, 'seed': seed, 'query_set': qset, 'B': B, 'rapid_hops': r,
                 'extended_centroids': c, 'centroid_top_nodes': t, 'centroid_fallback_nodes': f,
-                'nodes': a.nodes, 'seconds': round(time.time() - t0, 2), 'cmd': cmd})
+                'nodes': a.nodes, 'seconds': round(time.time() - t0, 2), 'cmd': cmd,
+                'vhash_config': vcfg})
     tmp = out + '.tmp'
     json.dump(res, open(tmp, 'w'), indent=1)
     os.replace(tmp, out)

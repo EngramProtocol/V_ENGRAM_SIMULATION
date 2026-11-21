@@ -11,10 +11,17 @@ export OMP_NUM_THREADS=1
 export VORTEX_ROOT="$LH"
 B="$LH/build/hash_functions_core/Vortex"
 VH="$WORK/vh_n$NODES"
+PIN="$(cd "$(dirname "$0")" && pwd)/sel"
 mkdir -p "$VH"
 for ds in code scifact; do
   [ -f "$VH/$ds.hnsw.index" ] || "$B/vortex_v1_cli" build_hnsw --dataset "$DATA/$ds/${ds}_base.fvecs" \
       --M 16 --efConstruction 100 --metric L2 --output "$VH/$ds.hnsw.index"
+  # Cấu hình VHash cố định (sel/*.json): bộ chọn chấm điểm có cả thời gian đo được nên chạy lại có thể
+  # chọn khác. SEMORD_RESELECT=1 thì bỏ cấu hình cố định và chạy lại bộ chọn.
+  if [ "${SEMORD_RESELECT:-0}" != 1 ] && [ "$NODES" = 1000 ] && [ -f "$PIN/${ds}_sel.json" ]; then
+    cp "$PIN/${ds}_sel.json" "$VH/${ds}_sel.json"
+    echo "$ds: dùng cấu hình VHash cố định trong $PIN/${ds}_sel.json"
+  fi
   if [ ! -f "$VH/${ds}_sel.json" ]; then
     ( cd "$VH" && "$B/vortex_model_selector" --dataset "$DATA/$ds/${ds}_base.fvecs" --index "$ds.hnsw.index" \
         --query "$DATA/$ds/${ds}_val_query.fvecs" --eval-k 5 --node-count-values "$NODES" \

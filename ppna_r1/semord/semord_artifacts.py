@@ -1,9 +1,10 @@
 """Dựng artifact VortexHash (VHash của Semord) cho code và SciFact, mỗi seed một model.
 
 Cấu hình VHash lấy từ bộ chọn của tác giả (vortex_model_selector, vai trò "best"), chạy trên
-query validation với số node triển khai 10.000. Mỗi seed huấn luyện lại model với đúng cấu hình
-đó (--seed khác nhau), rồi đặt vào Vortex_system/methods/vortex_v1_<ds>_s<seed>/ để vortex_bench
-nhận ra khi configure.
+query validation với overlay 1.000 node; mặc định dùng cấu hình đã cố định trong sel/*.json (xem
+semord_pipeline.sh). Mỗi seed huấn luyện lại model với đúng cấu hình đó (--seed khác nhau), rồi đặt
+vào Vortex_system/methods/vortex_v1_<ds>_s<seed>/ để vortex_bench nhận ra khi configure; cấu hình
+dùng để huấn luyện ghi trong semord_config.json của thư mục đó.
 
 Dùng: python3 semord_artifacts.py --lh <LearnedHash> --vx <Vortex_system> --data <semord_data>
       --sel-dir <thư mục chứa *_sel.json và *.hnsw.index> [--seeds 20235956,1,...]
@@ -65,14 +66,23 @@ def main():
         for s in seeds:
             name = f'{ds}_s{s}'
             out = os.path.join(a.vx, 'methods', f'vortex_v1_{name}')
+            # model đã có chỉ giữ lại khi huấn luyện đúng cấu hình hiện tại (ghi trong semord_config.json)
             if os.path.exists(os.path.join(out, 'vortex.json')):
-                continue
+                try:
+                    same = json.load(open(os.path.join(out, 'semord_config.json'))) == cfg
+                except (OSError, ValueError):
+                    same = False
+                if same:
+                    continue
+                print(f'{name}: model có sẵn không cùng cấu hình VHash hiện tại, huấn luyện lại', flush=True)
+                shutil.rmtree(out)
             tmp = out + '.tmp'
             shutil.rmtree(tmp, ignore_errors=True)
             os.makedirs(tmp)
             run([cli, 'train', '--dataset', base, '--nsw', nsw] + train_args(cfg) +
                 ['--seed', s, '--threads', a.threads, '--output', os.path.join(tmp, 'model.bin'),
                  '--codegen', '--codegen-dir', tmp, '--codegen-name', f'semord_{name}'], env=env)
+            json.dump(cfg, open(os.path.join(tmp, 'semord_config.json'), 'w'), indent=1)
             os.replace(tmp, out)
         summary[ds] = {'config': cfg, 'selector_query': sel.get('query'),
                        'selector_seed': sel.get('seed'), 'nsw': os.path.basename(nsw)}
