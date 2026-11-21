@@ -35,6 +35,13 @@ BASE_ENV = {
     "NUM_TABLES": "5", "PROBE_ORDER": "margin", "PROJ_FAMILY": "achlioptas",
     "META_ANCHORS": "1", "PLACEMENT_MODE": "scan",
 }
+# Số bảng L: mặc định 5 (cấu hình chính); kế hoạch lt của đợt 4 dùng --num-tables 8. Phải đặt trước
+# khi import src.*, vì src.routing đọc NUM_TABLES lúc import.
+for _i, _arg in enumerate(sys.argv):
+    if _arg == "--num-tables" and _i + 1 < len(sys.argv):
+        BASE_ENV["NUM_TABLES"] = str(int(sys.argv[_i + 1]))
+    elif _arg.startswith("--num-tables="):
+        BASE_ENV["NUM_TABLES"] = str(int(_arg.split("=", 1)[1]))
 for _k, _v in BASE_ENV.items():
     if os.environ.get(_k, _v) != _v:
         raise SystemExit(f"{_k}={os.environ[_k]} khác cấu hình của đợt 2 ({_v}); bỏ biến này đi")
@@ -535,9 +542,20 @@ def plan_probe(ctx):
         "note": "ước tuyến tính theo số object và số query"}
 
 
+def plan_lt(ctx):
+    """Đợt 4: L = 8 bảng trên mô hình iterative, cho mục chọn điểm vận hành (R2-2): T = 8, và T = 5
+    (cùng 40 target với cấu hình chính), trên cùng một mạng. Chạy với --num-tables 8."""
+    if int(os.environ["NUM_TABLES"]) != 8:
+        raise SystemExit("kế hoạch lt cần --num-tables 8")
+    join_stage(ctx)
+    st = ingest_stage(ctx, "main")
+    run_variant(ctx, st, "L8_T8")
+    run_variant(ctx, st, "L8_T5", T=5)
+
+
 PLANS = {"sem": plan_sem, "dec": plan_dec, "lsh": plan_lsh, "loss": plan_loss,
          "ws": plan_ws, "probe": plan_probe, "tk": plan_tk, "wl": plan_wl,
-         "refresh": plan_refresh}
+         "refresh": plan_refresh, "lt": plan_lt}
 
 
 def main():
@@ -561,6 +579,8 @@ def main():
     ap.add_argument("--refresh-rounds", type=int, default=2, help="số vòng làm mới bucket")
     ap.add_argument("--join-refresh", type=int, default=0,
                     help="số vòng làm mới k-bucket ngay sau join, cho mọi kế hoạch (0 = join cũ)")
+    ap.add_argument("--num-tables", type=int, default=5,
+                    help="số bảng L (đọc trước khi import src.*; kế hoạch lt: 8)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     _ir = a.ingest_rule.split(",")
