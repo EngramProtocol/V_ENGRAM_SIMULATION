@@ -1,4 +1,4 @@
-# Semord: so sánh với artifact của tác giả (tag `ppna-r1-semord`)
+# Semord: so sánh với artifact của tác giả (tag `ppna-r1-semord2`)
 
 ## Mục đích
 
@@ -34,15 +34,21 @@ literal `0ULL` gọi constructor `ModelInput` bị mơ hồ (tác giả build tr
 
 ## Cần trên server
 
-git, cmake 3.16 trở lên, g++ có C++20 (GCC 10 trở lên), BLAS và LAPACK, truy cập GitHub; khoảng
-3 GB đĩa cho code và build. `setup_semord.sh` kiểm và in lệnh cài nếu thiếu. Query validation
-(`data/*_val_query_embeddings.npy`) đã có từ bước chuẩn bị của đợt 1.
+Có sẵn git, make, g++ có C++20 (GCC 10 trở lên), venv của repo (python có pip), truy cập GitHub
+và PyPI; khoảng 3 GB đĩa cho code và build. Không cần sudo cho phần còn lại:
+
+- Không có cmake từ 3.16 thì `setup_semord.sh` cài cmake bằng pip vào `$SEMORD_ROOT/tools/cmake`.
+- Không có BLAS hoặc LAPACK của hệ thống thì `setup_semord.sh` build OpenBLAS 0.3.26 (có LAPACK
+  dịch sang C, không cần Fortran) vào `$SEMORD_ROOT/openblas`, thêm khoảng 5 đến 10 phút. Lần chạy
+  thử dùng BLAS và LAPACK tham chiếu của netlib, nên model VHash trên server có thể hơi khác.
+
+Query validation (`data/*_val_query_embeddings.npy`) đã có từ bước chuẩn bị của đợt 1.
 
 ## Chạy
 
 ```bash
 cd ~/V_ENGRAM_SIMULATION
-git fetch origin --tags && git checkout ppna-r1-semord
+git fetch origin --tags && git checkout ppna-r1-semord2
 sha256sum -c ppna_r1/SHA256SUMS_semord
 source venv/bin/activate
 tmux new -s semord -d "bash ~/V_ENGRAM_SIMULATION/ppna_r1/run_semord.sh"
@@ -53,18 +59,20 @@ Theo dõi và khi xong:
 ```bash
 tail -3 ppna_r1/logs_semord/run.log
 grep -c "XONG SEMORD" ppna_r1/logs_semord/run.log      # 1 là xong
+tmux ls                     # không còn phiên semord mà grep ra 0 là có bước lỗi
 cat ppna_r1/semord_report.txt
 tar czf ~/vengram_semord.tar.gz ppna_r1/out_semord ppna_r1/logs_semord ppna_r1/semord_report.txt ppna_r1/semord_summary.json
 sha256sum ~/vengram_semord.tar.gz
 ```
 
-Bước `setup` lỗi (thiếu công cụ) thì script dừng và in lệnh cài. Chạy lại đúng lệnh tmux sau khi
-cài; các bước đã xong được giữ (artifact, job V-Engram và từng lần chạy Semord đều bỏ qua nếu đã có).
+Bước `setup` chỉ dừng vì công cụ khi thiếu git, make, python3 hoặc g++ từ bản 10, là những thứ cần
+sudo để cài; khi đó script in lệnh cài. Chạy lại đúng lệnh tmux sau khi cài; các bước đã xong được
+giữ (OpenBLAS, artifact, job V-Engram và từng lần chạy Semord đều bỏ qua nếu đã có).
 
-**Thời gian ước trên server (8 nhân):** setup 10 đến 20 phút (biên dịch), artifact khoảng 20 phút
-(một luồng: chọn cấu hình, huấn luyện 20 model, build benchmark), V-Engram 20 job khoảng 15 phút,
-Semord validation 34 lần chạy và test 100 lần chạy khoảng 20 phút với 7 tiến trình (mỗi tiến trình
-khoảng 0,8 GB RAM). Tổng khoảng 1 giờ đến 1 giờ 15.
+**Thời gian ước trên server (8 nhân):** setup 10 đến 20 phút (biên dịch; thêm 5 đến 10 phút nếu
+phải build OpenBLAS), artifact khoảng 20 phút (một luồng: chọn cấu hình, huấn luyện 20 model, build
+benchmark), V-Engram 20 job khoảng 15 phút, Semord validation 28 lần chạy và test 100 lần chạy
+khoảng 20 phút với 7 tiến trình (mỗi tiến trình khoảng 0,8 GB RAM). Tổng khoảng 1 giờ đến 1 giờ 30.
 
 ## Kết quả đã có
 

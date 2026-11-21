@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# SEMORD (ppna-r1-semord): so V-Engram với Semord (arXiv 2609.25514) bằng artifact của tác giả,
+# SEMORD (ppna-r1-semord2): so V-Engram với Semord (arXiv 2609.25514) bằng artifact của tác giả,
 # cho R1-5. Hướng dẫn: ppna_r1/README_semord.md
 #
 #   source venv/bin/activate
@@ -25,6 +25,8 @@ STAGES="${STAGES:-setup data artifact vk val test report}"
 NP=$(nproc)
 PARALLEL="${PARALLEL:-$(( NP > 1 ? NP - 1 : 1 ))}"
 export SEMORD_ROOT="${SEMORD_ROOT:-$HOME/semord_src}"
+# máy không có cmake thì setup cài cmake bằng pip vào đây; bước artifact cũng cần thấy nó
+export PATH="$SEMORD_ROOT/tools/cmake/cmake/data/bin:$PATH"
 WORK="$SEMORD_ROOT/work"
 DATA="$SEMORD_ROOT/data"
 BENCH="$SEMORD_ROOT/Vortex_system/build/vortex_bench"
