@@ -1,0 +1,73 @@
+# Semord: so sánh với artifact của tác giả (tag `ppna-r1-semord`)
+
+## Mục đích
+
+R1-5 hỏi về baseline vector search phi tập trung gần đây. Semord (Wang và cộng sự, arXiv
+2609.25514, 9/2026) là hệ gần nhất về bài toán: overlay phi tập trung, mỗi query liên lạc một số ít
+peer. Semord khác V-Engram ở cả cách đặt khoá (VHash, hàm băm học từ dữ liệu) lẫn overlay (VecDHT,
+vòng kiểu Chord có thư mục vùng), nên được báo như một điểm tham chiếu ngoài, chạy bằng chính code
+của tác giả:
+
+- LearnedHash, commit `542528c8` (VHash: chọn cấu hình, huấn luyện, sinh code).
+- Vortex_system, commit `8766ddb5` (VecDHT, simulator OverlaySim, benchmark `vortex_bench`).
+
+Sửa duy nhất là `semord/learnedhash_linux.patch`: trên Linux `uint64_t` là `unsigned long` nên
+literal `0ULL` gọi constructor `ModelInput` bị mơ hồ (tác giả build trên macOS). Không đổi logic.
+
+## Thiết lập
+
+- **Quy mô.** Simulator của artifact dựng underlay full mesh, bộ nhớ tăng theo N²: 0,35 GB ở 500
+  node, 0,79 GB ở 1.000, 2,4 GB ở 2.000 (ước khoảng 50 GB ở 10.000). Vì vậy phép so đặt ở
+  N = 1.000 peer, mức lớn nhất trong dải tác giả đánh giá (32 đến 1.024 node).
+- **V-Engram** ở cùng N: mô hình iterative với join đầy đủ, T = 8, L = 5, K = 2 (= N/500, cùng tỉ
+  lệ N/K với cấu hình chính nên cùng độ dài tiền tố hiệu dụng), thêm K = 4 và 10.
+- **Semord.** Cấu hình VHash chọn bằng `vortex_model_selector` của tác giả (vai trò `best`), chạy
+  trên 500 query validation, cho overlay 1.000 node; mỗi seed huấn luyện lại model với cấu hình đó.
+  Ngân sách là `max_query_nodes` (B): 16 (mặc định trong bài Semord), 49 (bằng số peer V-Engram
+  liên lạc với K = 2) và 225 (khoảng bằng số ứng viên V-Engram xét). Tham số lập kế hoạch truy vấn
+  (vòng ring quanh owner, số vùng, số peer mỗi vùng) chọn trên query validation cho từng B; báo cả
+  tham số mặc định của artifact.
+- Cùng corpus, cùng 500 query test, cùng ground truth và Recall@5 như mọi bảng khác; 10 seed.
+- Mọi bước chạy một luồng (OMP_NUM_THREADS=1): dựng HNSW nhiều luồng cho đồ thị khác nhau giữa các
+  lần chạy, nên skeleton và model VHash cũng khác. Máy khác thư viện BLAS vẫn có thể cho model hơi
+  khác.
+
+## Cần trên server
+
+git, cmake 3.16 trở lên, g++ có C++20 (GCC 10 trở lên), BLAS và LAPACK, truy cập GitHub; khoảng
+3 GB đĩa cho code và build. `setup_semord.sh` kiểm và in lệnh cài nếu thiếu. Query validation
+(`data/*_val_query_embeddings.npy`) đã có từ bước chuẩn bị của đợt 1.
+
+## Chạy
+
+```bash
+cd ~/V_ENGRAM_SIMULATION
+git fetch origin --tags && git checkout ppna-r1-semord
+sha256sum -c ppna_r1/SHA256SUMS_semord
+source venv/bin/activate
+tmux new -s semord -d "bash ~/V_ENGRAM_SIMULATION/ppna_r1/run_semord.sh"
+```
+
+Theo dõi và khi xong:
+
+```bash
+tail -3 ppna_r1/logs_semord/run.log
+grep -c "XONG SEMORD" ppna_r1/logs_semord/run.log      # 1 là xong
+cat ppna_r1/semord_report.txt
+tar czf ~/vengram_semord.tar.gz ppna_r1/out_semord ppna_r1/logs_semord ppna_r1/semord_report.txt ppna_r1/semord_summary.json
+sha256sum ~/vengram_semord.tar.gz
+```
+
+Bước `setup` lỗi (thiếu công cụ) thì script dừng và in lệnh cài. Chạy lại đúng lệnh tmux sau khi
+cài; các bước đã xong được giữ (artifact, job V-Engram và từng lần chạy Semord đều bỏ qua nếu đã có).
+
+**Thời gian ước trên server (8 nhân):** setup 10 đến 20 phút (biên dịch), artifact khoảng 20 phút
+(một luồng: chọn cấu hình, huấn luyện 20 model, build benchmark), V-Engram 20 job khoảng 15 phút,
+Semord validation 34 lần chạy và test 100 lần chạy khoảng 20 phút với 7 tiến trình (mỗi tiến trình
+khoảng 0,8 GB RAM). Tổng khoảng 1 giờ đến 1 giờ 15.
+
+## Kết quả đã có
+
+Lần chạy trên máy thử (cùng script, cùng commit của artifact) và phân tích nằm trong
+`claude/Bao_cao_V_Engram_PPNA_Semord.md` của Project. Lần chạy trên server để mọi số của bài sinh
+từ cùng một release; model VHash có thể hơi khác nếu thư viện BLAS khác.

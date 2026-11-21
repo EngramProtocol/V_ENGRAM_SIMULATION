@@ -1,0 +1,26 @@
+diff --git a/learned_structures/rm_model/include/rm_model/models/model.h b/learned_structures/rm_model/include/rm_model/models/model.h
+index 34b4951..d793a17 100644
+--- a/learned_structures/rm_model/include/rm_model/models/model.h
++++ b/learned_structures/rm_model/include/rm_model/models/model.h
+@@ -5,6 +5,7 @@
+ #include <cstdint>
+ #include <cmath>
+ #include <limits>
++#include <type_traits>
+ #include <optional>
+ #include <ostream>
+ #include <set>
+@@ -62,6 +63,13 @@ class ModelInput {
+ 
+   ModelInput() : kind_(Kind::Int), int_val_(0) {}
+   ModelInput(uint64_t value) : kind_(Kind::Int), int_val_(value) {}
++  // Linux: uint64_t is unsigned long, so literals such as 0ULL (unsigned long long)
++  // are ambiguous between the overloads below. Accept them exactly.
++  template <typename T,
++            typename std::enable_if<std::is_same<T, unsigned long long>::value &&
++                                        !std::is_same<T, uint64_t>::value,
++                                    int>::type = 0>
++  ModelInput(T value) : kind_(Kind::Int), int_val_(static_cast<uint64_t>(value)) {}
+   ModelInput(uint32_t value) : kind_(Kind::Int), int_val_(value) {}
+   ModelInput(int32_t value) : kind_(Kind::Int), int_val_(static_cast<uint64_t>(value)) {}
+   ModelInput(double value) : kind_(Kind::Float), float_val_(value) {}
