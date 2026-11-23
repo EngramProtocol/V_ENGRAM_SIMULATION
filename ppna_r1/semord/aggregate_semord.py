@@ -1,7 +1,8 @@
 """Tổng hợp so sánh Semord và V-Engram ở N = 1.000 peer (10 seed, query test, Recall@5).
 
 Semord: file JSON của run_semord.py (stage test). V-Engram: file JSON của iterative.py, kế hoạch ws,
-join đầy đủ, K = 2 (= N/500), 4, 10. Số message của Semord lấy từ scalar
+join đầy đủ, K = 2 (= N/500), 4, 10; thêm kế hoạch lt (L = 8, biến thể L8_T5, L8_T8) khi --vengram
+có nhiều thư mục, cách nhau bởi dấu phẩy, và --ref-var chọn biến thể để ghép cặp. Số message của Semord lấy từ scalar
 overlay_runtime_hot_path_messages_mean của artifact (đếm riêng yêu cầu và trả lời), quy ra số
 cặp yêu cầu-trả lời (RPC) bằng tổng số yêu cầu tra cứu trên overlay và yêu cầu tìm kiếm gửi tới
 peer (overlay_lookup_requests_mean + overlay_search_dispatch_requests_mean), cùng cách đếm RPC của
@@ -34,13 +35,18 @@ def load_semord(root, N):
     return rows
 
 
-def load_vengram(root):
+def load_vengram(roots):
     rows = {}
-    for f in glob.glob(os.path.join(root, '*_s*.json')):
-        d = json.load(open(f))
-        for v, x in d['variants'].items():
-            rows.setdefault((d['dataset'], v), {})[d['seed']] = x
+    for root in roots.split(','):
+        for f in glob.glob(os.path.join(root, '*_s*.json')):
+            d = json.load(open(f))
+            for v, x in d['variants'].items():
+                rows.setdefault((d['dataset'], v), {})[d['seed']] = x
     return rows
+
+
+def refs(a):
+    return [f'K{k}' for k in a.ref_k.split(',') if k] + [v for v in a.ref_var.split(',') if v]
 
 
 def roles(root):
@@ -101,14 +107,15 @@ def summarize(a):
             'rpc_eval_mean': st.mean(x['rpc_eval_mean'] for x in xs),
             'metadata_gini_mean': st.mean(x['metadata_gini'] for x in xs),
         }
-    # hiệu ghép theo seed: Semord ở mỗi cấu hình trừ V-Engram ở từng K trong --ref-k
+    # hiệu ghép theo seed: Semord ở mỗi cấu hình trừ V-Engram ở từng biến thể (K trong --ref-k, và
+    # các biến thể trong --ref-var)
     for ks, s in out['semord'].items():
-        for k in a.ref_k.split(','):
-            vk = out['vengram'].get(f"{s['dataset']}/K{k}")
+        for rv in refs(a):
+            vk = out['vengram'].get(f"{s['dataset']}/{rv}")
             if not vk:
                 continue
             m, lo, hi, pos = ci([x - y for x, y in zip(s['recall'], vk['recall'])])
-            out['paired'].setdefault(ks, {})[f'minus_vengram_K{k}'] = [m, lo, hi, pos]
+            out['paired'].setdefault(ks, {})[f'minus_vengram_{rv}'] = [m, lo, hi, pos]
     return out
 
 
@@ -122,6 +129,7 @@ def main():
     ap.add_argument('--vengram', required=True)
     ap.add_argument('--nodes', type=int, default=1000)
     ap.add_argument('--ref-k', default='2', help='K của V-Engram để tính hiệu ghép, ví dụ 4,2')
+    ap.add_argument('--ref-var', default='', help='biến thể V-Engram khác để tính hiệu ghép, ví dụ L8_T5')
     ap.add_argument('--out', required=True)
     a = ap.parse_args()
     o = summarize(a)
@@ -138,10 +146,10 @@ def main():
             if v['dataset'] != ds:
                 continue
             ps = ''
-            for rk in a.ref_k.split(','):
-                p = o['paired'].get(k, {}).get(f'minus_vengram_K{rk}')
+            for rv in refs(a):
+                p = o['paired'].get(k, {}).get(f'minus_vengram_{rv}')
                 if p:
-                    ps += f' | − V-Engram K{rk}: {p[0]:+.2f} [{p[1]:+.2f}, {p[2]:+.2f}] dương {p[3]}/10'
+                    ps += f' | − V-Engram {rv}: {p[0]:+.2f} [{p[1]:+.2f}, {p[2]:+.2f}] dương {p[3]}/10'
             rs = f' | {v["role"]}' if v.get('role') else ''
             print(f'{"Semord B" + str(v["B"]) + " " + str(v["config"]):34s} {fmt(v["recall_mean"]) + " ± " + fmt(v["recall_sd"]):>12s} '
                   f'{v["peers_mean"]:7.1f} {v["peers_pct"]:7.2f} {v["vectors_mean"]:8.0f} {v["vectors_pct"]:6.1f} {v["requests_mean"]:7.0f}{ps}{rs}')

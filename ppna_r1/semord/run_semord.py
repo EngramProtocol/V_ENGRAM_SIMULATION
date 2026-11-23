@@ -207,7 +207,10 @@ def main():
         jobs = [(ds, SEEDS[0], 'val', B, cfg, a.out) for ds in dss for B in budgets
                 for cfg in grid_for_budget(B)]
         res = run_jobs(a, jobs)
-        best = {}
+        # gộp vào val_best.json đã có (các ngân sách chọn ở lần chạy trước giữ nguyên)
+        pbest = os.path.join(a.out, 'val_best.json')
+        best = json.load(open(pbest)) if os.path.exists(pbest) else {}
+        new_keys = []
         for ds in dss:
             for B in budgets:
                 rows = [x for x in res if x['dataset'] == ds and x['B'] == B]
@@ -215,6 +218,7 @@ def main():
                 top = rows[0]
                 dflt = [x for x in rows if (x['rapid_hops'], x['extended_centroids'],
                                             x['centroid_top_nodes'], x['centroid_fallback_nodes']) == DEFAULT]
+                new_keys.append(f'{ds}/B{B}')
                 best[f'{ds}/B{B}'] = {
                     'config': [top['rapid_hops'], top['extended_centroids'], top['centroid_top_nodes'],
                                top['centroid_fallback_nodes']],
@@ -223,9 +227,11 @@ def main():
                     'grid': [[x['rapid_hops'], x['extended_centroids'], x['centroid_top_nodes'],
                               x['centroid_fallback_nodes'], x['recall'], x['queried_nodes']['mean']]
                              for x in rows]}
-        json.dump(best, open(os.path.join(a.out, 'val_best.json'), 'w'), indent=1)
-        print(json.dumps({k: (v['config'], round(v['val_recall'], 4), v['default_val_recall'])
-                          for k, v in best.items()}, indent=1))
+        tmp = pbest + '.tmp'
+        json.dump(best, open(tmp, 'w'), indent=1)
+        os.replace(tmp, pbest)
+        print(json.dumps({k: (best[k]['config'], round(best[k]['val_recall'], 4), best[k]['default_val_recall'])
+                          for k in new_keys}, indent=1))
         return
     best = json.load(open(os.path.join(a.out, 'val_best.json')))
     jobs = []

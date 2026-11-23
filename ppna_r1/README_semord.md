@@ -1,4 +1,4 @@
-# Semord: so sánh với artifact của tác giả (tag `ppna-r1-semord4`)
+# Semord: so sánh với artifact của tác giả (tag `ppna-r1-semord4`; điểm vận hành L = 8: `ppna-r1-semord5`)
 
 ## Mục đích
 
@@ -101,6 +101,34 @@ bash ppna_r1/run_semord_n2000.sh
 - Mỗi tiến trình Semord ở 2.000 node cần khoảng 2,4 GB RAM.
 - Kết quả: `out_semord/runs_n2000`, `out_semord/vk2000`, `out_semord/sel_n2000`,
   `semord_report_n2000.txt`, `semord_summary_n2000.json`.
+
+## Điểm vận hành L = 8 (tag `ppna-r1-semord5`)
+
+Phép so ở trên đặt V-Engram ở cấu hình chính (L = 5, T = 8). Bước này thêm V-Engram ở điểm vận hành
+L = 8, T = 5 của mục chọn điểm vận hành (chọn ở đợt 1, trước phép so với Semord): cùng 40 lookup mỗi
+query như cấu hình chính, nhưng 8 record mỗi object thay vì 5. Semord chạy ở đúng ngân sách tương ứng.
+
+- **V-Engram.** Kế hoạch `lt` của `dot2/iterative.py` (biến thể L8_T5 và L8_T8 trên cùng một mạng),
+  K = N/500, join đầy đủ, code và SciFact, 10 seed, ở N = 1.000 và 2.000.
+- **Ngân sách của Semord.** B bằng số peer V-Engram L8_T5 liên lạc, trung bình 10 seed trên hai
+  corpus, làm tròn (`out_semord/budget_l8_n<N>.json`), cùng cách đặt B = 49, 53 và 97.
+- **Semord.** Cùng model VHash (cấu hình cố định trong `semord/sel/`); kế hoạch truy vấn chọn trên
+  query validation ở ngân sách B (gộp vào `val_best.json`); test 10 seed, kèm kế hoạch mặc định khi
+  B ≤ 64, như các ngân sách khác.
+
+```bash
+bash ppna_r1/run_semord_l8.sh
+```
+
+Chạy sau `run_semord.sh` và `run_semord_n2000.sh`, vì cần build, dữ liệu, model VHash và
+`val_best.json` của hai script đó. Kết quả: `out_semord/vk1000_L8`, `out_semord/vk2000_L8`, các lần
+chạy Semord mới trong `out_semord/runs` và `out_semord/runs_n2000`, `semord_report_l8_n1000.txt`,
+`semord_report_l8_n2000.txt` và hai file `semord_summary_l8_n*.json`. Thời gian ước trên máy 2 nhân:
+khoảng 1 giờ ở 1.000 peer và 1 giờ 30 ở 2.000 peer.
+
+Thay đổi code đi kèm, không đổi kết quả nào đã có: kế hoạch `lt` lấy K từ `--k` (mặc định 20 như
+đợt 4); `run_semord.py` gộp lựa chọn mới vào `val_best.json` thay vì ghi đè; `aggregate_semord.py`
+nhận nhiều thư mục V-Engram và biến thể ghép cặp `--ref-var`.
 
 ## Kết quả đã có
 

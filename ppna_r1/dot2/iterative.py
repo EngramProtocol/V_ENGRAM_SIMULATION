@@ -544,13 +544,14 @@ def plan_probe(ctx):
 
 def plan_lt(ctx):
     """Đợt 4: L = 8 bảng trên mô hình iterative, cho mục chọn điểm vận hành (R2-2): T = 8, và T = 5
-    (cùng 40 target với cấu hình chính), trên cùng một mạng. Chạy với --num-tables 8."""
+    (cùng 40 target với cấu hình chính), trên cùng một mạng. Chạy với --num-tables 8. K lấy từ --k:
+    mặc định 20 như đợt 4; phép so với Semord ở 1.000 và 2.000 peer dùng K = N/500."""
     if int(os.environ["NUM_TABLES"]) != 8:
         raise SystemExit("kế hoạch lt cần --num-tables 8")
     join_stage(ctx)
     st = ingest_stage(ctx, "main")
-    run_variant(ctx, st, "L8_T8")
-    run_variant(ctx, st, "L8_T5", T=5)
+    run_variant(ctx, st, "L8_T8", K=ctx.a.k)
+    run_variant(ctx, st, "L8_T5", T=5, K=ctx.a.k)
 
 
 PLANS = {"sem": plan_sem, "dec": plan_dec, "lsh": plan_lsh, "loss": plan_loss,
@@ -566,7 +567,7 @@ def main():
     ap.add_argument("--seed", type=int, default=20235956)
     ap.add_argument("--nq", type=int, default=500)
     ap.add_argument("--num-files", type=int, default=None)
-    ap.add_argument("--k", type=int, default=20, help="K của kế hoạch ws và probe")
+    ap.add_argument("--k", type=int, default=20, help="K của kế hoạch ws, probe và lt")
     ap.add_argument("--extra-k", default="", help="K thêm cho kế hoạch ws, vd. 20")
     ap.add_argument("--T", type=int, default=8, help="T của Bucket-LSH")
     ap.add_argument("--lsh-b", type=int, default=None, help="độ rộng bucket b (kế hoạch lsh)")
