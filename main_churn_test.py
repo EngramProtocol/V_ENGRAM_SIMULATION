@@ -2,6 +2,7 @@ import simpy
 import random
 from src.network import (
     bootstrap_network,
+    refresh_buckets,
     data_ingestion_process,
     PLACEMENT_CANDIDATES,
     METADATA_ANCHORS,
@@ -37,6 +38,24 @@ PQ_CODES_PATH = f"./data/{DATASET}_pq_codes{_PQSFX}.npy"
 NET_SEED = _os.environ.get("NET_SEED")
 INGEST_SAMPLE_ONLY = _os.environ.get("INGEST_SAMPLE_ONLY", "0") == "1"
 OUT_JSON = _os.environ.get("OUT_JSON")
+# ---- ppna-r1 đợt 6 (Bảng 9 với join đầy đủ) ----
+# JOIN_REFRESH=n: sau bootstrap_network, chạy n vòng làm mới k-bucket (refresh_buckets) như
+#   join của Kademlia gốc, cùng bộ sinh số với ppna_r1/dot2/iterative.py (--join-refresh).
+#   Vòng làm mới không đụng random của Python. Mặc định 0: join cũ, hành vi như trước.
+# RECORD_KILLS=1: ghi ID các peer bị tắt ở từng mức mất vào OUT_JSON (killed_hex). Không
+#   dùng thêm số ngẫu nhiên nào, nên mọi số đo trùng lần chạy không ghi.
+# KILL_FROM=<json>: tắt đúng các peer đã ghi trong file đó (cùng NET_SEED, cùng CHURN_STEPS)
+#   thay vì rút ngẫu nhiên, để hai cách dựng mạng được so trên cùng tập peer chết.
+# REFRESH_CACHE=<file>: bảng định tuyến sau vòng làm mới không phụ thuộc r (r chỉ dùng lúc ingest),
+#   nên job đầu tiên của một seed ghi k-bucket đã làm mới vào file này và các job sau của cùng seed
+#   nạp lại thay vì làm mới lần nữa. Chỉ nạp khi file khớp commit (RUN_COMMIT), NET_SEED, số vòng,
+#   tập peer và bảng định tuyến trước khi làm mới; khác bất kỳ điều nào thì làm mới như thường và ghi
+#   đè. Việc nạp không dùng số ngẫu nhiên nào; nhóm chk và smoke của ppna_r1/dot6 kiểm kết quả trùng
+#   từng số với lần làm mới thật.
+JOIN_REFRESH = int(_os.environ.get("JOIN_REFRESH", "0"))
+REFRESH_CACHE = _os.environ.get("REFRESH_CACHE")
+RECORD_KILLS = _os.environ.get("RECORD_KILLS", "0") == "1"
+KILL_FROM = _os.environ.get("KILL_FROM")
 
 NUM_NODES = int(_os.environ.get("NUM_NODES", "10000"))
 NUM_FILES = int(_os.environ.get("NUM_FILES", "20000"))  # code=20000, scifact=5183
@@ -49,13 +68,23 @@ CHURN_STEPS = [float(x) for x in
 SAMPLE_SEED = int(_os.environ.get("SAMPLE_SEED", "2026"))
 
 
-def kill_random_nodes(network_nodes, target_ratio, total_nodes):
+def kill_random_nodes(network_nodes, target_ratio, total_nodes, forced_ids=None):
+    """Tắt peer cho tới khi còn (1 - target_ratio) * total_nodes peer. Trả về tập peer bị tắt
+    ở bước này. forced_ids (đợt 6): tắt đúng các peer có ID này thay vì rút ngẫu nhiên."""
     desired_remaining = int(total_nodes * (1 - target_ratio))
     kill_count = max(0, len(network_nodes) - desired_remaining)
-    if kill_count == 0:
-        return 0
-
-    killed = set(random.sample(network_nodes, min(kill_count, len(network_nodes))))
+    if forced_ids is not None:
+        want = set(forced_ids)
+        killed = {node for node in network_nodes if node.node_id in want}
+        if len(killed) != len(want) or len(killed) != kill_count:
+            raise SystemExit(f"KILL_FROM: cần tắt {kill_count} peer, file ghi {len(want)}, "
+                             f"tìm thấy {len(killed)} trong mạng")
+    elif kill_count == 0:
+        return set()
+    else:
+        killed = set(random.sample(network_nodes, min(kill_count, len(network_nodes))))
+    if not killed:
+        return killed
     network_nodes[:] = [node for node in network_nodes if node not in killed]
     for node in network_nodes:
         node.routing_table.difference_update(killed)
@@ -66,7 +95,7 @@ def kill_random_nodes(network_nodes, target_ratio, total_nodes):
         if node.kbuckets:
             for _i, _b in node.kbuckets.items():
                 node.kbuckets[_i] = [p for p in _b if p not in killed]
-    return len(killed)
+    return killed
 
 
 def metadata_alive(vector, tag, network_nodes):
@@ -178,6 +207,58 @@ def run_churn_test(env):
     print("[*] Khoi tao mang P2P...")
     network_nodes = yield env.process(bootstrap_network(env, NUM_NODES, K_SIZE))
     _contacts = [len(n.routing_table) for n in network_nodes]
+    _refresh = []
+    if JOIN_REFRESH > 0:
+        if NET_SEED is None:
+            raise SystemExit("JOIN_REFRESH cần NET_SEED")
+        import gzip, hashlib, pickle
+        _pos = {n.node_id: i for i, n in enumerate(network_nodes)}
+
+        def _kb_pos():
+            return [[(_b, [_pos[p.node_id] for p in _lst]) for _b, _lst in n.kbuckets.items()]
+                    for n in network_nodes]
+
+        _key = {"commit": _os.environ.get("RUN_COMMIT", ""), "net_seed": NET_SEED, "rounds": JOIN_REFRESH,
+                "ids_hash": hashlib.sha1("".join(f"{n.node_id:040x}" for n in network_nodes)
+                                         .encode()).hexdigest(),
+                "pre_hash": hashlib.sha1(repr(_kb_pos()).encode()).hexdigest()}
+        _cache = None
+        if REFRESH_CACHE and _os.path.exists(REFRESH_CACHE):
+            with gzip.open(REFRESH_CACHE, "rb") as _fh:
+                _cache = pickle.load(_fh)
+            if any(_cache.get(k) != v for k, v in _key.items()):
+                print(f"[!] REFRESH_CACHE {REFRESH_CACHE} không khớp lần chạy này, làm mới lại")
+                _cache = None
+        _refresh_loaded = _cache is not None
+        if _cache is not None:
+            for _node, _bk in zip(network_nodes, _cache["kbuckets"]):
+                _node.kbuckets.clear()
+                _node.kbuckets.update({_b: [network_nodes[_j] for _j in _lst] for _b, _lst in _bk})
+                _node.routing_table = set(p for b in _node.kbuckets.values() for p in b)
+            _refresh = _cache["info"]
+            print(f"[*] Join đầy đủ: nạp k-bucket đã làm mới từ {REFRESH_CACHE}")
+        else:
+            _rng = np.random.RandomState((int(NET_SEED) * 104729 + 7) % (2 ** 32))
+            for _rnd in range(1, JOIN_REFRESH + 1):
+                _info = refresh_buckets(network_nodes, _rng)
+                _refresh.append(_info)
+                print(f"[*] Join đầy đủ, làm mới {_rnd}: {_info['lookups']} lookup, contact TB "
+                      f"{_info['contacts_mean']:.1f} (min {_info['contacts_min']})")
+            if REFRESH_CACHE:
+                _os.makedirs(_os.path.dirname(REFRESH_CACHE) or ".", exist_ok=True)
+                _tmp = f"{REFRESH_CACHE}.{_os.getpid()}.tmp"
+                with gzip.open(_tmp, "wb") as _fh:
+                    pickle.dump(dict(_key, info=_refresh, kbuckets=_kb_pos()), _fh, protocol=4)
+                _os.replace(_tmp, REFRESH_CACHE)
+        _contacts = [len(n.routing_table) for n in network_nodes]
+    _forced = None
+    if KILL_FROM:
+        import json as _json
+        with open(KILL_FROM, encoding="utf-8") as _fh:
+            _kf = _json.load(_fh)
+        if _kf.get("net_seed") != NET_SEED or [float(x) for x in _kf["churn_steps"]] != CHURN_STEPS:
+            raise SystemExit("KILL_FROM: khác NET_SEED hoặc CHURN_STEPS")
+        _forced = [[int(h, 16) for h in step] for step in _kf["killed_hex"]]
 
     # Cùng danh sách với bản cũ: random.Random(s).sample == random.seed(s); random.sample
     _pre = None
@@ -208,8 +289,12 @@ def run_churn_test(env):
     n = len(doc_ids)
     holders = build_holder_index(network_nodes, doc_ids)
     rows = []
-    for churn_ratio in CHURN_STEPS:
-        kill_random_nodes(network_nodes, churn_ratio, total_nodes)
+    killed_hex = []
+    for _step, churn_ratio in enumerate(CHURN_STEPS):
+        _killed = kill_random_nodes(network_nodes, churn_ratio, total_nodes,
+                                    forced_ids=None if _forced is None else _forced[_step])
+        if RECORD_KILLS:
+            killed_hex.append(sorted(f"{x.node_id:040x}" for x in _killed))
         meta_ok, payload_ok, e2e_ok, ph = count_recovered_files(network_nodes, doc_ids, vectors, holders)
         print(f"{churn_ratio:>9.0%} {100*meta_ok/n:>11.1f}% {100*payload_ok/n:>11.1f}% "
               f"{100*e2e_ok/n:>11.1f}%   | còn đủ shard {100*ph['payload_phys']/n:5.1f}% "
@@ -227,6 +312,16 @@ def run_churn_test(env):
 
     if OUT_JSON:
         import json
+        extra = {}
+        if JOIN_REFRESH > 0:
+            extra["join_refresh"] = _refresh
+        if KILL_FROM:
+            extra["kills_from"] = KILL_FROM
+        if JOIN_REFRESH > 0 and REFRESH_CACHE:
+            extra["refresh_cache"] = REFRESH_CACHE
+            extra["refresh_cache_loaded"] = _refresh_loaded
+        if RECORD_KILLS:
+            extra["killed_hex"] = killed_hex
         with open(OUT_JSON, "w") as fh:
             json.dump({"dataset": DATASET, "r": METADATA_ANCHORS, "nodes": NUM_NODES,
                        "num_files": NUM_FILES, "sample": n,
@@ -238,7 +333,7 @@ def run_churn_test(env):
                        "contacts_min": int(np.min(_contacts)),
                        "churn_steps": CHURN_STEPS,
                        "commit": _os.environ.get("RUN_COMMIT", ""),
-                       "rows": rows}, fh, indent=2)
+                       "rows": rows, **extra}, fh, indent=2)
         print(f"-> Lưu: {OUT_JSON}")
 
 
