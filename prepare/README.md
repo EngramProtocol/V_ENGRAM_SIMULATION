@@ -1,12 +1,17 @@
 # `prepare/` — corpus and embedding construction
 
-These scripts build every input the simulator reads from `data/`.
+These scripts build the corpora, embeddings, ground truth, and PQ codebooks in
+`data/` that the original experiments use. The inputs added in the revision
+(validation queries, intermediate corpus sizes, further PQ variants, and the e5
+and jina embeddings) are built by `ppna_r1/prep/`; `data/README.md` lists
+all files.
 
 The two notebooks were run in Google Colab on a T4 GPU and are kept as
-notebooks, unedited, because the data in the paper came from exactly this code
-and `!pip` / `google.colab.drive` cells are not valid Python outside Jupyter. To
-run them elsewhere, delete the mount and install cells and set `OUT_DIR` to a
-local path; nothing else depends on Colab.
+notebooks, as they were run, because the data in the paper came from exactly
+this code and `!pip` / `google.colab.drive` cells are not valid Python outside
+Jupyter. The only later edit replaced a server address in a command that `02`
+prints with a placeholder. To run them elsewhere, delete the mount and install
+cells and set `OUT_DIR` to a local path; nothing else depends on Colab.
 
 `03_build_pq.py` is a plain script that runs anywhere, no GPU required.
 
@@ -76,7 +81,7 @@ the documents, and the script warns when that happens.
 
 ## Output files the simulator expects in `data/`
 
-For each corpus `{name}` in `code`, `scifact`, `code50k`, `code100k`:
+For each corpus `{name}` in `code`, `scifact`, `squad`, `code50k`, `code100k`:
 
 ```
 {name}_corpus_embeddings.npy   (N, 1024) float32, L2-normalized
@@ -87,12 +92,14 @@ For each corpus `{name}` in `code`, `scifact`, `code50k`, `code100k`:
 {name}_pq_codes_m512.npy       (N, 512) uint8
 ```
 
-The `.npy` files are not in the repository: `code100k_corpus_embeddings.npy`
-alone is 410 MB, above GitHub's hard per-file limit. Rebuild them with these
-scripts, or request the archive from the corresponding author.
+The files of `code`, `scifact`, and `squad` are in the repository. Those of
+`code50k` and `code100k` are not: `code100k_corpus_embeddings.npy` alone is
+410 MB, above GitHub's hard per-file limit. Rebuild them with these scripts, or
+request the archive from the corresponding author.
 
 ## The SQuAD block
 
-`01_build_corpora.ipynb` ends with a cell that builds a SQuAD corpus. It is not
-used anywhere in the paper and is kept only because removing it would change
-the file from what was actually run.
+`01_build_corpora.ipynb` ends with a cell that builds the SQuAD v1.1 corpus
+(18,891 passages and 500 questions). A comment in the notebook says that the
+paper does not use it, which was true of the submitted manuscript. The revised
+manuscript uses it as one of the additional workloads.
