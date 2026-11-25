@@ -5,9 +5,10 @@ This directory contains the experiments of the first revision of the manuscript
 Overlays* (Peer-to-Peer Networking and Applications). Release `v2.0-r1`
 contains all of them.
 
-The experiments ran in batches. Each batch has a tag `ppna-r1-*`, a run script
-`run_<batch>.sh`, a job list and an aggregation script in `<batch>/`, and a
-SHA-256 manifest `SHA256SUMS_<batch>` of the files it ran with. The files
+The experiments ran in batches. Each batch has a tag `ppna-r1-*`, one or more
+run scripts `run_<batch>*.sh`, and a SHA-256 manifest `SHA256SUMS_<batch>` of
+the files it ran with; the experiment batches dot1 to dot6 and semord also have
+a job list and an aggregation script in `<batch>/`. The files
 `README_<batch>.md` are the original operator notes of each batch. They, the
 code comments, and the console messages in this directory are written in
 Vietnamese; they are kept unchanged because each batch manifest covers its own
@@ -15,7 +16,8 @@ notes. This file documents the batches in English.
 
 ## Conventions
 
-- **Seeds.** Every configuration uses the seeds 20235956 and 1 to 9.
+- **Seeds.** Every result of the revised manuscript uses the seeds 20235956
+  and 1 to 9; the verification batches also use subsets of them.
 - **Evaluation models.** The *iterative protocol* simulates join, record
   placement, and Ripple Search with SimPy (`dot2/iterative.py` on top of `src/`
   and `main_simulation.py`). The *idealized closest-peer reference*
@@ -28,9 +30,13 @@ notes. This file documents the batches in English.
   and `JOIN_REFRESH=1` in `main_churn_test.py`. The *reduced join* omits the
   refresh and replaces it by a second self-lookup; it is the join of the
   submitted manuscript, which the revision reports as a sensitivity analysis.
-- **Clean checkouts.** Every run script stops if a tracked file is modified,
-  and every result file records the commit it was produced from. Run each
-  batch from its tag.
+- **Clean checkouts.** The run scripts of dot1 to dot6 and semord stop if a
+  tracked file is modified, and record the commit they ran from in their logs.
+  Each job they start through `dot1/runner.py` also writes that commit to a
+  `.ok` file beside its result, and a rerun skips only the jobs finished with
+  the same commit. The prep and verification scripts record the commit and any
+  modified file in `logs_<batch>/env.txt` but do not stop. Run each batch from
+  its tag.
 - **Table numbers in the reports.** The aggregation scripts were written
   before the revised manuscript was assembled. Their reports number tables as
   in the submitted manuscript ("Bảng N" means Table N of the submitted
@@ -80,12 +86,13 @@ bash ppna_r1/run_<batch>.sh
 A manifest verifies at its own tag. Later batches changed some shared files,
 so an earlier manifest does not verify at a later commit.
 
-Run scripts write results to `ppna_r1/out_<batch>/`, logs to
-`ppna_r1/logs_<batch>/`, and a report and a summary to
-`ppna_r1/<batch>_report.txt` and `ppna_r1/<batch>_summary.json`. A script that
-is interrupted resumes when it is run again: jobs already finished with the same
-commit are skipped. `PARALLEL=n` bounds the number of concurrent jobs (default:
-number of cores minus one).
+Run scripts write logs to `ppna_r1/logs_<batch>*/` and a report to
+`ppna_r1/<batch>_report*.txt`. The experiment batches write their results to
+`ppna_r1/out_<batch>/` and a summary to `ppna_r1/<batch>_summary*.json`; prep
+writes the files it builds to `data/`. A script that is interrupted resumes
+when it is run again (verify-norm only with `SKIP_DONE=1`). `PARALLEL=n` bounds
+the number of concurrent jobs (default: the number of cores minus one, or 4 for
+the verification batches).
 
 Later batches read the outputs of earlier ones, so run them in this order:
 
