@@ -11,7 +11,9 @@ notebooks, as they were run, because the data in the paper came from exactly
 this code and `!pip` / `google.colab.drive` cells are not valid Python outside
 Jupyter. The only later edit replaced a server address in a command that `02`
 prints with a placeholder. To run them elsewhere, delete the mount and install
-cells and set `OUT_DIR` to a local path; nothing else depends on Colab.
+cells and set `OUT_DIR` to a local path; nothing else depends on Colab. The
+drivers that the notebooks mention, such as `run_weakscaling.sh`, are kept in
+`archive/drivers/` and run from release `v1.0-cc`.
 
 `03_build_pq.py` is a plain script that runs anywhere, no GPU required.
 

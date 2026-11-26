@@ -169,6 +169,6 @@ reports list the values from which it is computed.
 
 ## Earlier results
 
-The drivers and aggregation scripts in the repository root (`run_*.sh`,
-`analyze_*.py`) produced the results of the submitted manuscript. Check out
-`v1.0-cc` to reproduce them.
+The drivers `run_*.sh` and aggregation scripts `analyze_*.py` that produced the
+results of the submitted manuscript are kept in `archive/`. They run from
+release `v1.0-cc`, where they are in the repository root.
