@@ -7,12 +7,13 @@ contains all of them.
 
 The experiments ran in batches. Each batch has a tag `ppna-r1-*`, one or more
 run scripts `run_<batch>*.sh`, and a SHA-256 manifest `SHA256SUMS_<batch>` of
-the files it ran with; the experiment batches dot1 to dot6 and semord also have
+the files it ran with; the experiment batches dot1 to dot7 and semord also have
 a job list and an aggregation script in `<batch>/`. The files
 `README_<batch>.md` are the original operator notes of each batch. They, the
 code comments, and the console messages in this directory are written in
-Vietnamese; they are kept unchanged because each batch manifest covers its own
-notes. This file documents the batches in English.
+Vietnamese and are kept unchanged because each batch manifest covers its own
+notes; dot7, added after this documentation, is written in English. This file
+documents the batches in English.
 
 ## Conventions
 
@@ -30,7 +31,7 @@ notes. This file documents the batches in English.
   and `JOIN_REFRESH=1` in `main_churn_test.py`. The *reduced join* omits the
   refresh and replaces it by a second self-lookup; it is the join of the
   submitted manuscript, which the revision reports as a sensitivity analysis.
-- **Clean checkouts.** The run scripts of dot1 to dot6 and semord stop if a
+- **Clean checkouts.** The run scripts of dot1 to dot7 and semord stop if a
   tracked file is modified, and record the commit they ran from in their logs.
   Each job they start through `dot1/runner.py` also writes that commit to a
   `.ok` file beside its result, and a rerun skips only the jobs finished with
@@ -56,6 +57,7 @@ notes. This file documents the batches in English.
 | dot5 | `ppna-r1-dot5`, `ppna-r1-dot5b` | `run_dot5.sh` | 30 | Session churn on the protocol; `dot5b` adds the no-churn Recall@5 of both models (`dot5/ideal_t0.py`) and corrects the aggregation |
 | dot6 | `ppna-r1-dot6` | `run_dot6.sh` | 61 | Availability under static peer loss with the standard join, on the same failed peers as dot1 |
 | semord | `ppna-r1-semord`, `-semord2`, `-semord3`, `-semord5` | `run_semord.sh`, `run_semord_n2000.sh`, `run_semord_l8.sh` | 418 | Comparison with Semord, using the authors' artifact: 338 Semord runs and 80 V-Engram jobs |
+| dot7 | `ppna-r1-dot7` | `run_dot7.sh` | 60 | Reference model: 4, 6, and 8 bits per PQ index at `m` = 512 on both corpora; data step p5 (`prep/p5_pq_bits.py`) builds the codebooks |
 
 The single-core cost of the larger batches was about 75 hours for dot1
 (including the second pass after the embeddings), 28 hours for dot2, 76 hours
@@ -66,7 +68,8 @@ The Semord comparison took about ten hours.
 ## Running the batches
 
 Use the simulator environment of the repository root (`requirements.txt`) for
-every batch except the embeddings. The embedding step uses its own environment:
+every batch except the embeddings. The embedding step uses its own environment,
+which `run_dot7.sh` also uses for data step p5 when it exists:
 
 ```bash
 python3 -m venv venv_prep
@@ -122,6 +125,11 @@ Later batches read the outputs of earlier ones, so run them in this order:
    differently on another run. The operator notes call the state that added
    the 2,000-peer runs `ppna-r1-semord4`; this repository has no such tag, and
    that commit is part of `ppna-r1-semord5`.
+6. **dot7**, from `ppna-r1-dot7`. It reads the results of dot1 (group `t4`
+   for its regression check and group `r11` for the comparisons with
+   `m` = 256 and exact ranking), and its first stage runs data step p5 in the
+   prep environment, which writes the codebooks with 4 and 6 bits per index
+   to `data/`.
 
 ## Sources of the tables and figures of the revised manuscript
 
@@ -141,7 +149,7 @@ reports list the values from which it is computed.
 | Section 4.5, margin-ranked probing | text | dot3 §8 (protocol); dot2 §9 (reduced join) |
 | Table 9, Semord at 1,000 peers | new | semord: `semord_report.txt`, `semord_report_l8_n1000.txt` |
 | Table 10, termination | Table 7 | dot3 §5 and §8 (standard join); dot2 §2 (reduced join) |
-| Table 11, design sensitivity | new | dot1 §12; dot3 §8 (`c` = 9, `T` = 5 on the protocol); dot4 (`L` = 8 on the protocol) |
+| Table 11, design sensitivity | new | dot1 §12; dot7 (bits per PQ index); dot3 §8 (`c` = 9, `T` = 5 on the protocol); dot4 (`L` = 8 on the protocol) |
 | Table 12, additional workloads | new | prep (embeddings); dot1 §14; dot3 §8 (protocol); dot3 §4 (reduced join) |
 | Table 13, replication | Table 8 | dot1 §6; dot3 §8 (`r` = 2 and 3 on the protocol) |
 | Table 14, static peer loss | Table 9 | dot1 §7 (reference); dot3 §8 (protocol recall); dot6 (availability) |

@@ -113,7 +113,7 @@ alternatives can be run from one binary. The table lists the variables read by
 `main_simulation.py` and `src/`. Several defaults are development settings
 rather than paper settings, so every result sets its flags explicitly: the
 drivers of `v1.0-cc` do so for the submission, and for the revision the job
-lists (`ppna_r1/<batch>/jobs.py` for dot1 to dot6, `ppna_r1/semord/jobs_vk.py`
+lists (`ppna_r1/<batch>/jobs.py` for dot1 to dot7, `ppna_r1/semord/jobs_vk.py`
 for the V-Engram runs of the Semord comparison) give the exact command of every
 result.
 
